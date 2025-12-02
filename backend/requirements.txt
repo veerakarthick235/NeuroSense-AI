@@ -8,3 +8,4 @@ google-generativeai
 numpy
 pandas
 gunicorn
+scikit-learn
