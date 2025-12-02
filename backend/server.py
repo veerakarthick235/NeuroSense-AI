@@ -17,7 +17,7 @@ import uuid
 import random
 import logging
 import os
-import uvicorn # <-- Added for running the app
+import uvicorn
 
 # -------------------------------------------------------
 # Load environment variables
@@ -31,12 +31,15 @@ DB_NAME = os.environ.get("DB_NAME")
 JWT_SECRET = os.environ.get("JWT_SECRET")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Safety checks for environment variables
+# Safety checks and logging setup
 if not all([MONGO_URL, DB_NAME, JWT_SECRET, GEMINI_API_KEY]):
-    logging.error("Missing one or more environment variables!")
+    logging.warning("Missing one or more environment variables!")
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
+else:
+    logging.warning("GEMINI_API_KEY not found. AI insights will be disabled.")
+
 
 # -------------------------------------------------------
 # FastAPI App
@@ -48,12 +51,12 @@ security = HTTPBearer()
 # -------------------------------------------------------
 # Database
 # -------------------------------------------------------
+# Initialize client and db using environment variables
 client = AsyncIOMotorClient(MONGO_URL) if MONGO_URL else None
 db = client[DB_NAME] if client and DB_NAME else None
 
-# Check database connection (simple check)
-if not db:
-    logging.warning("Database connection may not be established due to missing MONGO_URL/DB_NAME.")
+# The problematic line 'if not db:' has been removed to fix the Render deployment error.
+# We rely on the checks inside the route handlers instead.
 
 
 # -------------------------------------------------------
@@ -142,6 +145,10 @@ def create_token(user_id: str, email: str, role: str):
         "role": role,
         "exp": datetime.now(timezone.utc) + timedelta(days=7),
     }
+    # Check if JWT_SECRET is set before encoding
+    if not JWT_SECRET:
+         raise RuntimeError("JWT secret not configured.")
+         
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 
@@ -190,7 +197,7 @@ def generate_simulated_sensor_data(data_type: str):
 # -------------------------------------------------------
 @api_router.post("/auth/register")
 async def register(data: UserRegister):
-    if not db:
+    if db is None:
         raise HTTPException(status_code=500, detail="Database connection error")
 
     existing = await db.users.find_one({"email": data.email})
@@ -216,7 +223,7 @@ async def register(data: UserRegister):
 
 @api_router.post("/auth/login")
 async def login(data: UserLogin):
-    if not db:
+    if db is None:
         raise HTTPException(status_code=500, detail="Database connection error")
 
     user = await db.users.find_one({"email": data.email})
@@ -239,7 +246,7 @@ async def login(data: UserLogin):
 # -------------------------------------------------------
 @api_router.post("/data/sensors/simulate")
 async def simulate(current_user=Depends(get_current_user)):
-    if not db:
+    if db is None:
         raise HTTPException(status_code=500, detail="Database connection error")
         
     uid = current_user["user_id"]
@@ -261,7 +268,7 @@ async def simulate(current_user=Depends(get_current_user)):
 # -------------------------------------------------------
 @api_router.get("/metrics/latest")
 async def latest_metrics(current_user=Depends(get_current_user)):
-    if not db:
+    if db is None:
         raise HTTPException(status_code=500, detail="Database connection error")
         
     uid = current_user["user_id"]
@@ -305,7 +312,7 @@ async def latest_metrics(current_user=Depends(get_current_user)):
 # -------------------------------------------------------
 @api_router.post("/alerts/check")
 async def check_alerts(current_user=Depends(get_current_user)):
-    if not db:
+    if db is None:
         raise HTTPException(status_code=500, detail="Database connection error")
         
     uid = current_user["user_id"]
@@ -346,10 +353,10 @@ async def check_alerts(current_user=Depends(get_current_user)):
 # -------------------------------------------------------
 @api_router.post("/insights/generate")
 async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depends(get_current_user)):
-    if not db:
+    if db is None:
         raise HTTPException(status_code=500, detail="Database connection error")
-    if not genai:
-         raise HTTPException(status_code=500, detail="AI service not configured.")
+    if not GEMINI_API_KEY:
+         raise HTTPException(status_code=503, detail="AI service is unavailable due to missing API key.")
         
     uid = current_user["user_id"]
 
@@ -379,19 +386,21 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
     vol = round(np.std(overall), 3)
 
     # Anomaly detection (last score significantly below average)
-    mean_vocal = statistics.mean(vocal)
-    mean_movement = statistics.mean(movement)
+    mean_vocal = statistics.mean(vocal) if vocal else 0
+    mean_movement = statistics.mean(movement) if movement else 0
+    mean_social = statistics.mean(social) if social else 0
 
     anomalies = {
         "vocal_anomaly": vocal[-1] < (mean_vocal - 10) if mean_vocal > 0 else False,
         "movement_anomaly": movement[-1] < (mean_movement - 10) if mean_movement > 0 else False,
-        "social_anomaly": social[-1] < (statistics.mean(social) - 10) if statistics.mean(social) > 0 else False,
+        "social_anomaly": social[-1] < (mean_social - 10) if mean_social > 0 else False,
     }
 
     # Custom Risk Score calculation
+    current_overall_score = overall[-1] if overall else 100
     risk_score = (
-        (100 - overall[-1]) * 0.5 +  # Weighting current status
-        (vol * 2) +                   # Weighting volatility
+        (100 - current_overall_score) * 0.5 +  # Weighting current status
+        (vol * 2) +                           # Weighting volatility
         (10 if anomalies["movement_anomaly"] else 0) +
         (10 if anomalies["vocal_anomaly"] else 0)
     )
@@ -407,7 +416,7 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
     
     The analysis should focus on **trend, stability, and potential risks**.
     
-    * **Current Overall Score:** {overall[-1]:.1f}
+    * **Current Overall Score:** {current_overall_score:.1f}
     * **Trend (Slope over last 7 days):** {slope} (Higher means improving)
     * **Volatility (Standard Deviation):** {vol} (Higher means less stable)
     * **Anomalies Detected (Last reading significantly low):**
@@ -445,7 +454,7 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
 # -------------------------------------------------------
 @api_router.get("/research/patients")
 async def patients(current_user=Depends(get_current_user)):
-    if not db:
+    if db is None:
         raise HTTPException(status_code=500, detail="Database connection error")
         
     if current_user["role"] != "researcher":
@@ -467,7 +476,7 @@ async def patients(current_user=Depends(get_current_user)):
 
 @api_router.get("/research/statistics")
 async def stats(current_user=Depends(get_current_user)):
-    if not db:
+    if db is None:
         raise HTTPException(status_code=500, detail="Database connection error")
         
     if current_user["role"] != "researcher":
@@ -510,11 +519,11 @@ async def root():
 app.include_router(api_router)
 
 # -------------------------------------------------------
-# 🔥 FINAL CORS CONFIGURATION — FIXING THE DEPLOYMENT ERROR
+# 🔥 FINAL CORS CONFIGURATION — FIXES THE ORIGINAL NETLIFY/RENDER ERROR
 # -------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    # Allow the Netlify frontend origin (and localhost for testing)
+    # Allow the Netlify frontend origin (and common localhost ports for testing)
     allow_origins=[
         "https://neuro-sense-ai.netlify.app",
         "http://localhost:3000",
@@ -541,10 +550,10 @@ async def shutdown():
         client.close()
 
 # -------------------------------------------------------
-# 🚀 Run the Application (For local development)
+# 🚀 Run the Application (For local development only)
 # -------------------------------------------------------
 if __name__ == "__main__":
-    # Note: When deploying to Render, the server is typically started
-    # using a command in the 'start command' setting (e.g., 'uvicorn server:app --host 0.0.0.0 --port 10000').
+    # Note: On Render, the start command (e.g., 'uvicorn server:app --host 0.0.0.0 --port 10000') 
+    # executes the server directly, bypassing this if block.
     # This block is only for testing the server locally.
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
