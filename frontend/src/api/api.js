@@ -1,25 +1,35 @@
 import axios from "axios";
 
-// Auto-detect environment and consolidate the URL construction
-// This ensures that whether you are developing locally or running on Netlify, 
-// the correct backend URL is used.
-const BASE_URL = process.env.REACT_APP_BACKEND_URL 
-  ? `${process.env.REACT_APP_BACKEND_URL}/api` 
-  : "https://neuro-sense-ai.onrender.com/api"; // Production fallback
+/*
+  ---------------------------------------------------------
+  AUTO-DETECT BACKEND URL
+  ---------------------------------------------------------
+  Priority:
+  1. REACT_APP_BACKEND_URL  (Netlify environment variable)
+  2. Render backend direct URL (fallback)
+  ---------------------------------------------------------
+*/
+
+const BASE_URL =
+  process.env.REACT_APP_BACKEND_URL ||
+  "https://neuro-sense-ai.onrender.com"; // fallback for localhost builds
 
 console.log("🔗 API Base URL:", BASE_URL);
 
+// Create axios instance
 const api = axios.create({
-  baseURL: BASE_URL,
+  baseURL: `${BASE_URL}/api`,
   headers: {
     "Content-Type": "application/json",
   },
-  // Recommended to set to true if you are using session cookies, 
-  // but acceptable as false if strictly relying on localStorage JWTs.
-  withCredentials: true, 
+  withCredentials: false, // Netlify + Render CORS safe
 });
 
-// 1. Request Interceptor: Automatically attach the Bearer token
+/*
+  ---------------------------------------------------------
+  AUTO-ATTACH JWT TOKEN
+  ---------------------------------------------------------
+*/
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem("token");
   if (token) {
@@ -28,27 +38,38 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// 2. Response Interceptor: Automatically handle 401 Unauthorized (Token Expiration)
-api.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    // Check if the response exists, has a status, and the status is 401 (Unauthorized)
-    if (error.response && error.response.status === 401) {
-      console.error("Authentication Error: Token expired or invalid. Forcing logout.");
-      
-      // Clear the local token
-      localStorage.removeItem("token");
-      
-      // Ensure this runs only in the browser and the user is not already on the login page
-      if (typeof window !== 'undefined' && window.location.pathname !== "/login") {
-        // Redirect the user. You might need to change "/login" to your actual path.
-        window.location.assign("/login"); 
-      }
-    }
-    
-    // Reject promise for the calling component to handle generic errors
-    return Promise.reject(error);
-  }
-);
+/*
+  ---------------------------------------------------------
+  FIXED, SAFE API ENDPOINT WRAPPERS
+  ---------------------------------------------------------
+  These functions ensure the frontend ALWAYS uses the
+  correct HTTP method and correct backend routes.
+  ---------------------------------------------------------
+*/
+
+// AUTH
+export const registerUser = (data) => api.post("/auth/register", data);
+export const loginUser = (data) => api.post("/auth/login", data);
+export const fetchMe = () => api.get("/auth/me");
+
+// METRICS
+export const fetchLatestMetrics = () => api.get("/metrics/latest");
+export const fetchMetricHistory = (days = 7) =>
+  api.get(`/metrics/history?days=${days}`);
+
+// SENSOR SIMULATION
+export const simulateSensorData = () =>
+  api.post("/data/sensors/simulate");
+
+// ALERTS
+export const checkAlerts = () => api.post("/alerts/check");
+
+// AI INSIGHTS (POST, not GET)
+export const generateInsight = (userId) =>
+  api.post("/insights/generate", { user_id: userId });
+
+// RESEARCHER
+export const fetchPatients = () => api.get("/research/patients");
+export const fetchStatistics = () => api.get("/research/statistics");
 
 export default api;
