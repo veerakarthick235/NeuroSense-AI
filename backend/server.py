@@ -17,6 +17,7 @@ import uuid
 import random
 import logging
 import os
+import uvicorn # <-- Added for running the app
 
 # -------------------------------------------------------
 # Load environment variables
@@ -24,12 +25,18 @@ import os
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
-MONGO_URL = os.environ["MONGO_URL"]
-DB_NAME = os.environ["DB_NAME"]
-JWT_SECRET = os.environ["JWT_SECRET"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+# Ensure environment variables are loaded
+MONGO_URL = os.environ.get("MONGO_URL")
+DB_NAME = os.environ.get("DB_NAME")
+JWT_SECRET = os.environ.get("JWT_SECRET")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-genai.configure(api_key=GEMINI_API_KEY)
+# Safety checks for environment variables
+if not all([MONGO_URL, DB_NAME, JWT_SECRET, GEMINI_API_KEY]):
+    logging.error("Missing one or more environment variables!")
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 # -------------------------------------------------------
 # FastAPI App
@@ -41,8 +48,12 @@ security = HTTPBearer()
 # -------------------------------------------------------
 # Database
 # -------------------------------------------------------
-client = AsyncIOMotorClient(MONGO_URL)
-db = client[DB_NAME]
+client = AsyncIOMotorClient(MONGO_URL) if MONGO_URL else None
+db = client[DB_NAME] if client and DB_NAME else None
+
+# Check database connection (simple check)
+if not db:
+    logging.warning("Database connection may not be established due to missing MONGO_URL/DB_NAME.")
 
 
 # -------------------------------------------------------
@@ -136,8 +147,14 @@ def create_token(user_id: str, email: str, role: str):
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
+        # Check if JWT_SECRET is set before decoding
+        if not JWT_SECRET:
+             raise HTTPException(status_code=500, detail="Server misconfiguration: JWT secret not set.")
+        
         return jwt.decode(credentials.credentials, JWT_SECRET, algorithms=["HS256"])
-    except:
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+    except Exception:
         raise HTTPException(status_code=401, detail="Invalid authentication")
 
 
@@ -168,12 +185,14 @@ def generate_simulated_sensor_data(data_type: str):
             "engagement_level": round(random.uniform(0.4, 1.0), 2),
         }
 
-
 # -------------------------------------------------------
 # Auth
 # -------------------------------------------------------
 @api_router.post("/auth/register")
 async def register(data: UserRegister):
+    if not db:
+        raise HTTPException(status_code=500, detail="Database connection error")
+
     existing = await db.users.find_one({"email": data.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -197,6 +216,9 @@ async def register(data: UserRegister):
 
 @api_router.post("/auth/login")
 async def login(data: UserLogin):
+    if not db:
+        raise HTTPException(status_code=500, detail="Database connection error")
+
     user = await db.users.find_one({"email": data.email})
     if not user or not verify_password(data.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -217,6 +239,9 @@ async def login(data: UserLogin):
 # -------------------------------------------------------
 @api_router.post("/data/sensors/simulate")
 async def simulate(current_user=Depends(get_current_user)):
+    if not db:
+        raise HTTPException(status_code=500, detail="Database connection error")
+        
     uid = current_user["user_id"]
     out = []
 
@@ -236,6 +261,9 @@ async def simulate(current_user=Depends(get_current_user)):
 # -------------------------------------------------------
 @api_router.get("/metrics/latest")
 async def latest_metrics(current_user=Depends(get_current_user)):
+    if not db:
+        raise HTTPException(status_code=500, detail="Database connection error")
+        
     uid = current_user["user_id"]
 
     async def get_latest(type):
@@ -247,11 +275,15 @@ async def latest_metrics(current_user=Depends(get_current_user)):
     movement = await get_latest("movement")
     social = await get_latest("social")
 
-    v = vocal["metrics"]["voice_quality"] * 100 if vocal else 0
-    m = movement["metrics"]["gait_stability"] * 100 if movement else 0
-    s = social["metrics"]["engagement_level"] * 100 if social else 0
+    # Use 0 if data is missing to allow score calculation to proceed
+    v = vocal["metrics"]["voice_quality"] * 100 if vocal and "voice_quality" in vocal.get("metrics", {}) else 0
+    m = movement["metrics"]["gait_stability"] * 100 if movement and "gait_stability" in movement.get("metrics", {}) else 0
+    s = social["metrics"]["engagement_level"] * 100 if social and "engagement_level" in social.get("metrics", {}) else 0
+    
+    # Calculate overall score, avoiding division by zero if all are 0/missing
+    count = sum(1 for score in [v, m, s] if score != 0)
+    overall = (v + m + s) / count if count > 0 else 0
 
-    overall = (v + m + s) / 3
 
     obj = HealthMetrics(
         user_id=uid,
@@ -273,6 +305,9 @@ async def latest_metrics(current_user=Depends(get_current_user)):
 # -------------------------------------------------------
 @api_router.post("/alerts/check")
 async def check_alerts(current_user=Depends(get_current_user)):
+    if not db:
+        raise HTTPException(status_code=500, detail="Database connection error")
+        
     uid = current_user["user_id"]
     latest = await db.health_metrics.find_one(
         {"user_id": uid}, {"_id": 0}, sort=[("timestamp", -1)]
@@ -285,10 +320,10 @@ async def check_alerts(current_user=Depends(get_current_user)):
 
     if score < 60:
         sev = "high"
-        msg = "Significant cognitive decline detected."
+        msg = "Significant cognitive decline detected. Immediate review recommended."
     elif score < 75:
         sev = "medium"
-        msg = "Moderate cognitive deviation detected."
+        msg = "Moderate cognitive deviation detected. Trend monitoring is advised."
     else:
         return {"alerts_created": 0, "alerts": []}
 
@@ -311,6 +346,11 @@ async def check_alerts(current_user=Depends(get_current_user)):
 # -------------------------------------------------------
 @api_router.post("/insights/generate")
 async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depends(get_current_user)):
+    if not db:
+        raise HTTPException(status_code=500, detail="Database connection error")
+    if not genai:
+         raise HTTPException(status_code=500, detail="AI service not configured.")
+        
     uid = current_user["user_id"]
 
     records = await db.health_metrics.find(
@@ -322,24 +362,36 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
 
     records = list(reversed(records))
 
-    overall = [r["overall_score"] for r in records]
-    vocal = [r["vocal_score"] for r in records]
-    movement = [r["movement_score"] for r in records]
-    social = [r["social_score"] for r in records]
+    overall = [r.get("overall_score", 0) for r in records]
+    vocal = [r.get("vocal_score", 0) for r in records]
+    movement = [r.get("movement_score", 0) for r in records]
+    social = [r.get("social_score", 0) for r in records]
 
+    # Time series analysis for trend and volatility
     X = np.arange(len(overall)).reshape(-1, 1)
-    slope = round(LinearRegression().fit(X, overall).coef_[0], 3)
+    
+    # Check if there are enough points for regression and ensure non-zero values
+    if len(overall) > 1 and sum(overall) != 0:
+        slope = round(LinearRegression().fit(X, overall).coef_[0], 3)
+    else:
+        slope = 0
+        
     vol = round(np.std(overall), 3)
 
+    # Anomaly detection (last score significantly below average)
+    mean_vocal = statistics.mean(vocal)
+    mean_movement = statistics.mean(movement)
+
     anomalies = {
-        "vocal_anomaly": vocal[-1] < (statistics.mean(vocal) - 10),
-        "movement_anomaly": movement[-1] < (statistics.mean(movement) - 10),
-        "social_anomaly": social[-1] < (statistics.mean(social) - 10),
+        "vocal_anomaly": vocal[-1] < (mean_vocal - 10) if mean_vocal > 0 else False,
+        "movement_anomaly": movement[-1] < (mean_movement - 10) if mean_movement > 0 else False,
+        "social_anomaly": social[-1] < (statistics.mean(social) - 10) if statistics.mean(social) > 0 else False,
     }
 
+    # Custom Risk Score calculation
     risk_score = (
-        (100 - overall[-1]) * 0.5 +
-        (vol * 2) +
+        (100 - overall[-1]) * 0.5 +  # Weighting current status
+        (vol * 2) +                   # Weighting volatility
         (10 if anomalies["movement_anomaly"] else 0) +
         (10 if anomalies["vocal_anomaly"] else 0)
     )
@@ -351,13 +403,19 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
     )
 
     prompt = f"""
-    Provide a clinical-style cognitive analysis.
-
-    Trend slope: {slope}
-    Volatility: {vol}
-    Anomalies: {anomalies}
-    Risk Score: {risk_score}
-    Risk Category: {risk}
+    Provide a clinical-style cognitive analysis for a patient based on the following key metrics.
+    
+    The analysis should focus on **trend, stability, and potential risks**.
+    
+    * **Current Overall Score:** {overall[-1]:.1f}
+    * **Trend (Slope over last 7 days):** {slope} (Higher means improving)
+    * **Volatility (Standard Deviation):** {vol} (Higher means less stable)
+    * **Anomalies Detected (Last reading significantly low):**
+        * Vocal: {anomalies["vocal_anomaly"]}
+        * Movement: {anomalies["movement_anomaly"]}
+    * **Calculated Risk Category:** {risk}
+    
+    Based on these data points, summarize the patient's current cognitive stability and provide one actionable recommendation for their care team.
     """
 
     try:
@@ -378,7 +436,7 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
         return d
 
     except Exception as e:
-        logging.error(str(e))
+        logging.error(f"Insight generation failed: {e}")
         raise HTTPException(status_code=500, detail="Insight generation failed")
 
 
@@ -387,13 +445,18 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
 # -------------------------------------------------------
 @api_router.get("/research/patients")
 async def patients(current_user=Depends(get_current_user)):
+    if not db:
+        raise HTTPException(status_code=500, detail="Database connection error")
+        
     if current_user["role"] != "researcher":
-        raise HTTPException(status_code=403)
+        raise HTTPException(status_code=403, detail="Permission denied")
 
+    # Fetch all patients
     pts = await db.users.find(
         {"role": "patient"}, {"_id": 0, "password_hash": 0}
     ).to_list(500)
 
+    # Attach latest metrics for each patient
     for p in pts:
         p["latest_metrics"] = await db.health_metrics.find_one(
             {"user_id": p["id"]}, {"_id": 0}, sort=[("timestamp", -1)]
@@ -404,8 +467,11 @@ async def patients(current_user=Depends(get_current_user)):
 
 @api_router.get("/research/statistics")
 async def stats(current_user=Depends(get_current_user)):
+    if not db:
+        raise HTTPException(status_code=500, detail="Database connection error")
+        
     if current_user["role"] != "researcher":
-        raise HTTPException(status_code=403)
+        raise HTTPException(status_code=403, detail="Permission denied")
 
     total = await db.users.count_documents({"role": "patient"})
     sensor = await db.sensor_data.count_documents({})
@@ -415,15 +481,15 @@ async def stats(current_user=Depends(get_current_user)):
         {}, {"_id": 0}
     ).sort("timestamp", -1).limit(100).to_list(100)
 
+    avg = {"overall": 0, "vocal": 0, "movement": 0, "social": 0}
     if recents:
+        count = len(recents)
         avg = {
-            "overall": sum(m["overall_score"] for m in recents) / len(recents),
-            "vocal": sum(m["vocal_score"] for m in recents) / len(recents),
-            "movement": sum(m["movement_score"] for m in recents) / len(recents),
-            "social": sum(m["social_score"] for m in recents) / len(recents),
+            "overall": sum(m.get("overall_score", 0) for m in recents) / count,
+            "vocal": sum(m.get("vocal_score", 0) for m in recents) / count,
+            "movement": sum(m.get("movement_score", 0) for m in recents) / count,
+            "social": sum(m.get("social_score", 0) for m in recents) / count,
         }
-    else:
-        avg = {"overall": 0, "vocal": 0, "movement": 0, "social": 0}
 
     return {
         "total_patients": total,
@@ -443,21 +509,24 @@ async def root():
 
 app.include_router(api_router)
 
-
 # -------------------------------------------------------
-# 🔥 FINAL CORS CONFIGURATION — **WORKS FOR RENDER + NETLIFY**
+# 🔥 FINAL CORS CONFIGURATION — FIXING THE DEPLOYMENT ERROR
 # -------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
+    # Allow the Netlify frontend origin (and localhost for testing)
     allow_origins=[
         "https://neuro-sense-ai.netlify.app",
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:8000"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Render needs this for OPTIONS
+# Render needs this for OPTIONS (preflight) requests
 @app.options("/{full_path:path}")
 async def preflight(full_path: str):
     return {"message": "OK"}
@@ -468,4 +537,14 @@ async def preflight(full_path: str):
 # -------------------------------------------------------
 @app.on_event("shutdown")
 async def shutdown():
-    client.close()
+    if client:
+        client.close()
+
+# -------------------------------------------------------
+# 🚀 Run the Application (For local development)
+# -------------------------------------------------------
+if __name__ == "__main__":
+    # Note: When deploying to Render, the server is typically started
+    # using a command in the 'start command' setting (e.g., 'uvicorn server:app --host 0.0.0.0 --port 10000').
+    # This block is only for testing the server locally.
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
