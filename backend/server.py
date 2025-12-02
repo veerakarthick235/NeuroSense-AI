@@ -170,7 +170,7 @@ def generate_simulated_sensor_data(data_type: str):
 
 
 # -------------------------------------------------------
-# Auth Endpoints
+# Auth
 # -------------------------------------------------------
 @api_router.post("/auth/register")
 async def register(data: UserRegister):
@@ -189,8 +189,10 @@ async def register(data: UserRegister):
     d["created_at"] = d["created_at"].isoformat()
     await db.users.insert_one(d)
 
-    token = create_token(user.id, user.email, user.role)
-    return {"token": token, "user": {"id": user.id, "email": user.email, "name": user.name, "role": user.role}}
+    return {
+        "token": create_token(user.id, user.email, user.role),
+        "user": {"id": user.id, "email": user.email, "name": user.name, "role": user.role},
+    }
 
 
 @api_router.post("/auth/login")
@@ -199,9 +201,8 @@ async def login(data: UserLogin):
     if not user or not verify_password(data.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    token = create_token(user["id"], user["email"], user["role"])
     return {
-        "token": token,
+        "token": create_token(user["id"], user["email"], user["role"]),
         "user": {
             "id": user["id"],
             "email": user["email"],
@@ -211,13 +212,8 @@ async def login(data: UserLogin):
     }
 
 
-@api_router.get("/auth/me")
-async def me(current_user=Depends(get_current_user)):
-    return await db.users.find_one({"id": current_user["user_id"]}, {"_id": 0, "password_hash": 0})
-
-
 # -------------------------------------------------------
-# Sensor Simulation
+# Sensor simulation
 # -------------------------------------------------------
 @api_router.post("/data/sensors/simulate")
 async def simulate(current_user=Depends(get_current_user)):
@@ -227,7 +223,6 @@ async def simulate(current_user=Depends(get_current_user)):
     for typ in ["vocal", "movement", "social"]:
         metrics = generate_simulated_sensor_data(typ)
         obj = SensorData(user_id=uid, data_type=typ, metrics=metrics)
-
         d = obj.model_dump()
         d["timestamp"] = d["timestamp"].isoformat()
         await db.sensor_data.insert_one(d)
@@ -243,9 +238,9 @@ async def simulate(current_user=Depends(get_current_user)):
 async def latest_metrics(current_user=Depends(get_current_user)):
     uid = current_user["user_id"]
 
-    async def get_latest(typ):
+    async def get_latest(type):
         return await db.sensor_data.find_one(
-            {"user_id": uid, "data_type": typ}, {"_id": 0}, sort=[("timestamp", -1)]
+            {"user_id": uid, "data_type": type}, {"_id": 0}, sort=[("timestamp", -1)]
         )
 
     vocal = await get_latest("vocal")
@@ -255,6 +250,7 @@ async def latest_metrics(current_user=Depends(get_current_user)):
     v = vocal["metrics"]["voice_quality"] * 100 if vocal else 0
     m = movement["metrics"]["gait_stability"] * 100 if movement else 0
     s = social["metrics"]["engagement_level"] * 100 if social else 0
+
     overall = (v + m + s) / 3
 
     obj = HealthMetrics(
@@ -270,16 +266,6 @@ async def latest_metrics(current_user=Depends(get_current_user)):
     await db.health_metrics.insert_one(d)
 
     return d
-
-
-@api_router.get("/metrics/history")
-async def history(days: int = 7, current_user=Depends(get_current_user)):
-    uid = current_user["user_id"]
-    start = datetime.now(timezone.utc) - timedelta(days=days)
-
-    return await db.health_metrics.find(
-        {"user_id": uid, "timestamp": {"$gte": start.isoformat()}}, {"_id": 0}
-    ).sort("timestamp", 1).to_list(500)
 
 
 # -------------------------------------------------------
@@ -321,7 +307,7 @@ async def check_alerts(current_user=Depends(get_current_user)):
 
 
 # -------------------------------------------------------
-# Gemini Insights
+# AI Insight (Gemini)
 # -------------------------------------------------------
 @api_router.post("/insights/generate")
 async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depends(get_current_user)):
@@ -334,7 +320,6 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
     if not records:
         return {"message": "No data available"}
 
-    # Reverse to oldest → latest
     records = list(reversed(records))
 
     overall = [r["overall_score"] for r in records]
@@ -359,7 +344,11 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
         (10 if anomalies["vocal_anomaly"] else 0)
     )
 
-    risk = "Low" if risk_score < 40 else "Medium" if risk_score < 70 else "High"
+    risk = (
+        "Low" if risk_score < 40 else
+        "Medium" if risk_score < 70 else
+        "High"
+    )
 
     prompt = f"""
     Provide a clinical-style cognitive analysis.
@@ -374,11 +363,12 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
     try:
         model = genai.GenerativeModel("models/gemini-2.5-flash")
         response = model.generate_content(prompt)
+        text = response.text.strip()
 
         obj = AIInsight(
             user_id=uid,
             insight_type="advanced_analysis",
-            content=response.text.strip(),
+            content=text,
         )
 
         d = obj.model_dump()
@@ -393,7 +383,7 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
 
 
 # -------------------------------------------------------
-# Researcher Endpoints
+# Researcher
 # -------------------------------------------------------
 @api_router.get("/research/patients")
 async def patients(current_user=Depends(get_current_user)):
@@ -418,25 +408,27 @@ async def stats(current_user=Depends(get_current_user)):
         raise HTTPException(status_code=403)
 
     total = await db.users.count_documents({"role": "patient"})
-    sensor_count = await db.sensor_data.count_documents({})
-    alert_count = await db.tbi_alerts.count_documents({})
+    sensor = await db.sensor_data.count_documents({})
+    alerts = await db.tbi_alerts.count_documents({})
 
-    recents = await db.health_metrics.find({}, {"_id": 0}).sort("timestamp", -1).limit(100).to_list(100)
+    recents = await db.health_metrics.find(
+        {}, {"_id": 0}
+    ).sort("timestamp", -1).limit(100).to_list(100)
 
     if recents:
         avg = {
-            "overall": sum(r["overall_score"] for r in recents) / len(recents),
-            "vocal": sum(r["vocal_score"] for r in recents) / len(recents),
-            "movement": sum(r["movement_score"] for r in recents) / len(recents),
-            "social": sum(r["social_score"] for r in recents) / len(recents),
+            "overall": sum(m["overall_score"] for m in recents) / len(recents),
+            "vocal": sum(m["vocal_score"] for m in recents) / len(recents),
+            "movement": sum(m["movement_score"] for m in recents) / len(recents),
+            "social": sum(m["social_score"] for m in recents) / len(recents),
         }
     else:
         avg = {"overall": 0, "vocal": 0, "movement": 0, "social": 0}
 
     return {
         "total_patients": total,
-        "total_sensor_readings": sensor_count,
-        "total_alerts": alert_count,
+        "total_sensor_readings": sensor,
+        "total_alerts": alerts,
         "average_scores": avg,
     }
 
@@ -451,21 +443,21 @@ async def root():
 
 app.include_router(api_router)
 
+
 # -------------------------------------------------------
-# CORS — FINAL FIX (Render + Netlify)
+# 🔥 FINAL CORS CONFIGURATION — **WORKS FOR RENDER + NETLIFY**
 # -------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://neuro-sense-ai.netlify.app",
     ],
-    allow_origin_regex="https://.*netlify\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# FIX: Allow all OPTIONS requests (Render requires this)
+# Render needs this for OPTIONS
 @app.options("/{full_path:path}")
 async def preflight(full_path: str):
     return {"message": "OK"}
