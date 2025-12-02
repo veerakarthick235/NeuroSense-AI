@@ -18,9 +18,9 @@ import random
 import logging
 import os
 
-# -----------------------------------------------
+# -------------------------------------------------------
 # Load environment variables
-# -----------------------------------------------
+# -------------------------------------------------------
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
@@ -29,26 +29,25 @@ DB_NAME = os.environ["DB_NAME"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
-# Gemini setup
 genai.configure(api_key=GEMINI_API_KEY)
 
-# -----------------------------------------------
-# FastAPI Setup
-# -----------------------------------------------
+# -------------------------------------------------------
+# FastAPI App
+# -------------------------------------------------------
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 security = HTTPBearer()
 
-# -----------------------------------------------
-# MongoDB Client
-# -----------------------------------------------
+# -------------------------------------------------------
+# Database
+# -------------------------------------------------------
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
 
-# -----------------------------------------------
-# MODELS
-# -----------------------------------------------
+# -------------------------------------------------------
+# Models
+# -------------------------------------------------------
 class User(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -114,9 +113,9 @@ class GenerateInsightRequest(BaseModel):
     user_id: str
 
 
-# -----------------------------------------------
-# HELPERS
-# -----------------------------------------------
+# -------------------------------------------------------
+# Helpers
+# -------------------------------------------------------
 def hash_password(password: str):
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
@@ -170,9 +169,9 @@ def generate_simulated_sensor_data(data_type: str):
         }
 
 
-# -----------------------------------------------
-# AUTH ENDPOINTS
-# -----------------------------------------------
+# -------------------------------------------------------
+# Auth Endpoints
+# -------------------------------------------------------
 @api_router.post("/auth/register")
 async def register(data: UserRegister):
     existing = await db.users.find_one({"email": data.email})
@@ -214,49 +213,48 @@ async def login(data: UserLogin):
 
 @api_router.get("/auth/me")
 async def me(current_user=Depends(get_current_user)):
-    user = await db.users.find_one({"id": current_user["user_id"]}, {"_id": 0, "password_hash": 0})
-    return user
+    return await db.users.find_one({"id": current_user["user_id"]}, {"_id": 0, "password_hash": 0})
 
 
-# -----------------------------------------------
-# SENSOR SIMULATION
-# -----------------------------------------------
+# -------------------------------------------------------
+# Sensor Simulation
+# -------------------------------------------------------
 @api_router.post("/data/sensors/simulate")
 async def simulate(current_user=Depends(get_current_user)):
     uid = current_user["user_id"]
-    output = []
+    out = []
 
     for typ in ["vocal", "movement", "social"]:
         metrics = generate_simulated_sensor_data(typ)
         obj = SensorData(user_id=uid, data_type=typ, metrics=metrics)
+
         d = obj.model_dump()
         d["timestamp"] = d["timestamp"].isoformat()
         await db.sensor_data.insert_one(d)
-        output.append(d)
+        out.append(d)
 
-    return {"message": "Simulated data generated", "data": output}
+    return {"message": "Simulated data generated", "data": out}
 
 
-# -----------------------------------------------
-# METRICS
-# -----------------------------------------------
+# -------------------------------------------------------
+# Metrics
+# -------------------------------------------------------
 @api_router.get("/metrics/latest")
 async def latest_metrics(current_user=Depends(get_current_user)):
     uid = current_user["user_id"]
 
-    async def latest(type):
+    async def get_latest(typ):
         return await db.sensor_data.find_one(
-            {"user_id": uid, "data_type": type}, {"_id": 0}, sort=[("timestamp", -1)]
+            {"user_id": uid, "data_type": typ}, {"_id": 0}, sort=[("timestamp", -1)]
         )
 
-    vocal = await latest("vocal")
-    movement = await latest("movement")
-    social = await latest("social")
+    vocal = await get_latest("vocal")
+    movement = await get_latest("movement")
+    social = await get_latest("social")
 
     v = vocal["metrics"]["voice_quality"] * 100 if vocal else 0
     m = movement["metrics"]["gait_stability"] * 100 if movement else 0
     s = social["metrics"]["engagement_level"] * 100 if social else 0
-
     overall = (v + m + s) / 3
 
     obj = HealthMetrics(
@@ -270,6 +268,7 @@ async def latest_metrics(current_user=Depends(get_current_user)):
     d = obj.model_dump()
     d["timestamp"] = d["timestamp"].isoformat()
     await db.health_metrics.insert_one(d)
+
     return d
 
 
@@ -278,16 +277,14 @@ async def history(days: int = 7, current_user=Depends(get_current_user)):
     uid = current_user["user_id"]
     start = datetime.now(timezone.utc) - timedelta(days=days)
 
-    hist = await db.health_metrics.find(
+    return await db.health_metrics.find(
         {"user_id": uid, "timestamp": {"$gte": start.isoformat()}}, {"_id": 0}
     ).sort("timestamp", 1).to_list(500)
 
-    return hist
 
-
-# -----------------------------------------------
-# ALERTS
-# -----------------------------------------------
+# -------------------------------------------------------
+# Alerts
+# -------------------------------------------------------
 @api_router.post("/alerts/check")
 async def check_alerts(current_user=Depends(get_current_user)):
     uid = current_user["user_id"]
@@ -305,7 +302,7 @@ async def check_alerts(current_user=Depends(get_current_user)):
         msg = "Significant cognitive decline detected."
     elif score < 75:
         sev = "medium"
-        msg = "Moderate decline detected — monitor closely."
+        msg = "Moderate cognitive deviation detected."
     else:
         return {"alerts_created": 0, "alerts": []}
 
@@ -323,14 +320,9 @@ async def check_alerts(current_user=Depends(get_current_user)):
     return {"alerts_created": 1, "alerts": [d]}
 
 
-# -----------------------------------------------
-# ADVANCED AI INSIGHT (Gemini)
-# -----------------------------------------------
-@api_router.get("/cors-test")
-async def cors_test():
-    return {"message": "CORS OK"}
-
-
+# -------------------------------------------------------
+# Gemini Insights
+# -------------------------------------------------------
 @api_router.post("/insights/generate")
 async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depends(get_current_user)):
     uid = current_user["user_id"]
@@ -342,6 +334,7 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
     if not records:
         return {"message": "No data available"}
 
+    # Reverse to oldest → latest
     records = list(reversed(records))
 
     overall = [r["overall_score"] for r in records]
@@ -366,11 +359,7 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
         (10 if anomalies["vocal_anomaly"] else 0)
     )
 
-    risk = (
-        "Low" if risk_score < 40 else
-        "Medium" if risk_score < 70 else
-        "High"
-    )
+    risk = "Low" if risk_score < 40 else "Medium" if risk_score < 70 else "High"
 
     prompt = f"""
     Provide a clinical-style cognitive analysis.
@@ -385,12 +374,11 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
     try:
         model = genai.GenerativeModel("models/gemini-2.5-flash")
         response = model.generate_content(prompt)
-        text = response.text.strip()
 
         obj = AIInsight(
             user_id=uid,
             insight_type="advanced_analysis",
-            content=text,
+            content=response.text.strip(),
         )
 
         d = obj.model_dump()
@@ -404,9 +392,9 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
         raise HTTPException(status_code=500, detail="Insight generation failed")
 
 
-# -----------------------------------------------
-# RESEARCHER ENDPOINTS
-# -----------------------------------------------
+# -------------------------------------------------------
+# Researcher Endpoints
+# -------------------------------------------------------
 @api_router.get("/research/patients")
 async def patients(current_user=Depends(get_current_user)):
     if current_user["role"] != "researcher":
@@ -417,10 +405,9 @@ async def patients(current_user=Depends(get_current_user)):
     ).to_list(500)
 
     for p in pts:
-        m = await db.health_metrics.find_one(
+        p["latest_metrics"] = await db.health_metrics.find_one(
             {"user_id": p["id"]}, {"_id": 0}, sort=[("timestamp", -1)]
         )
-        p["latest_metrics"] = m
 
     return pts
 
@@ -431,59 +418,62 @@ async def stats(current_user=Depends(get_current_user)):
         raise HTTPException(status_code=403)
 
     total = await db.users.count_documents({"role": "patient"})
-    sensor = await db.sensor_data.count_documents({})
-    alerts = await db.tbi_alerts.count_documents({})
+    sensor_count = await db.sensor_data.count_documents({})
+    alert_count = await db.tbi_alerts.count_documents({})
 
     recents = await db.health_metrics.find({}, {"_id": 0}).sort("timestamp", -1).limit(100).to_list(100)
 
     if recents:
         avg = {
-            "overall": sum(m["overall_score"] for m in recents) / len(recents),
-            "vocal": sum(m["vocal_score"] for m in recents) / len(recents),
-            "movement": sum(m["movement_score"] for m in recents) / len(recents),
-            "social": sum(m["social_score"] for m in recents) / len(recents),
+            "overall": sum(r["overall_score"] for r in recents) / len(recents),
+            "vocal": sum(r["vocal_score"] for r in recents) / len(recents),
+            "movement": sum(r["movement_score"] for r in recents) / len(recents),
+            "social": sum(r["social_score"] for r in recents) / len(recents),
         }
     else:
         avg = {"overall": 0, "vocal": 0, "movement": 0, "social": 0}
 
     return {
         "total_patients": total,
-        "total_sensor_readings": sensor,
-        "total_alerts": alerts,
+        "total_sensor_readings": sensor_count,
+        "total_alerts": alert_count,
         "average_scores": avg,
     }
 
 
-# -----------------------------------------------
-# ROOT ENDPOINT
-# -----------------------------------------------
+# -------------------------------------------------------
+# Root
+# -------------------------------------------------------
 @api_router.get("/")
 async def root():
     return {"message": "NeuroSense AI Backend Running"}
 
 
-# Attach router
 app.include_router(api_router)
 
-
-# -----------------------------------------------
-# CORS — FIXED FOR NETLIFY + RENDER
-# -----------------------------------------------
+# -------------------------------------------------------
+# CORS — FINAL FIX (Render + Netlify)
+# -------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://neuro-sense-ai.netlify.app",
-        "https://*.netlify.app",
     ],
+    allow_origin_regex="https://.*netlify\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# FIX: Allow all OPTIONS requests (Render requires this)
+@app.options("/{full_path:path}")
+async def preflight(full_path: str):
+    return {"message": "OK"}
 
-# -----------------------------------------------
-# SHUTDOWN
-# -----------------------------------------------
+
+# -------------------------------------------------------
+# Shutdown
+# -------------------------------------------------------
 @app.on_event("shutdown")
 async def shutdown():
     client.close()
