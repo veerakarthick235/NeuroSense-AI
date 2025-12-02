@@ -18,6 +18,7 @@ import random
 import logging
 import os
 import uvicorn
+from bson import ObjectId # <-- IMPORTED FOR ID SANITIZATION
 
 # -------------------------------------------------------
 # Load environment variables
@@ -31,9 +32,8 @@ DB_NAME = os.environ.get("DB_NAME")
 JWT_SECRET = os.environ.get("JWT_SECRET")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Safety checks and logging setup
-if not all([MONGO_URL, DB_NAME, JWT_SECRET, GEMINI_API_KEY]):
-    logging.warning("Missing one or more environment variables!")
+if not all([MONGO_URL, DB_NAME, JWT_SECRET]):
+    logging.warning("Missing critical environment variables!")
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -51,13 +51,8 @@ security = HTTPBearer()
 # -------------------------------------------------------
 # Database
 # -------------------------------------------------------
-# Initialize client and db using environment variables
 client = AsyncIOMotorClient(MONGO_URL) if MONGO_URL else None
 db = client[DB_NAME] if client and DB_NAME else None
-
-# The problematic line 'if not db:' has been removed to fix the Render deployment error.
-# We rely on the checks inside the route handlers instead.
-
 
 # -------------------------------------------------------
 # Models
@@ -145,7 +140,6 @@ def create_token(user_id: str, email: str, role: str):
         "role": role,
         "exp": datetime.now(timezone.utc) + timedelta(days=7),
     }
-    # Check if JWT_SECRET is set before encoding
     if not JWT_SECRET:
          raise RuntimeError("JWT secret not configured.")
          
@@ -154,7 +148,6 @@ def create_token(user_id: str, email: str, role: str):
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
-        # Check if JWT_SECRET is set before decoding
         if not JWT_SECRET:
              raise HTTPException(status_code=500, detail="Server misconfiguration: JWT secret not set.")
         
@@ -163,6 +156,16 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         raise HTTPException(status_code=401, detail="Invalid authentication token")
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid authentication")
+
+# 🔥 NEW HELPER FUNCTION TO SANITIZE MONGO DOCUMENTS
+def sanitize_mongo_doc(doc):
+    """Converts MongoDB's native '_id' (ObjectId) to a string 'id' for JSON serialization."""
+    if doc and isinstance(doc, dict):
+        if "_id" in doc and isinstance(doc["_id"], ObjectId):
+            # Replace '_id' with 'id' as a string and remove the original
+            doc["id"] = str(doc.pop("_id"))
+        return doc
+    return doc
 
 
 def generate_simulated_sensor_data(data_type: str):
@@ -212,6 +215,7 @@ async def register(data: UserRegister):
     )
 
     d = user.model_dump()
+    # The 'id' field is already a str from the User model's default factory
     d["created_at"] = d["created_at"].isoformat()
     await db.users.insert_one(d)
 
@@ -229,14 +233,17 @@ async def login(data: UserLogin):
     user = await db.users.find_one({"email": data.email})
     if not user or not verify_password(data.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # 🔥 FIX: Sanitize the MongoDB document before returning it
+    sanitized_user = sanitize_mongo_doc(user)
 
     return {
-        "token": create_token(user["id"], user["email"], user["role"]),
+        "token": create_token(sanitized_user["id"], sanitized_user["email"], sanitized_user["role"]),
         "user": {
-            "id": user["id"],
-            "email": user["email"],
-            "name": user["name"],
-            "role": user["role"],
+            "id": sanitized_user["id"],
+            "email": sanitized_user["email"],
+            "name": sanitized_user["name"],
+            "role": sanitized_user["role"],
         },
     }
 
@@ -274,20 +281,21 @@ async def latest_metrics(current_user=Depends(get_current_user)):
     uid = current_user["user_id"]
 
     async def get_latest(type):
-        return await db.sensor_data.find_one(
-            {"user_id": uid, "data_type": type}, {"_id": 0}, sort=[("timestamp", -1)]
+        # We fetch only the metrics, timestamp, and user_id here, excluding the native '_id'
+        doc = await db.sensor_data.find_one(
+            {"user_id": uid, "data_type": type}, {"_id": 0, "metrics": 1, "timestamp": 1, "user_id": 1}, sort=[("timestamp", -1)]
         )
+        return doc
 
     vocal = await get_latest("vocal")
     movement = await get_latest("movement")
     social = await get_latest("social")
 
-    # Use 0 if data is missing to allow score calculation to proceed
+    # Use 0 if data is missing
     v = vocal["metrics"]["voice_quality"] * 100 if vocal and "voice_quality" in vocal.get("metrics", {}) else 0
     m = movement["metrics"]["gait_stability"] * 100 if movement and "gait_stability" in movement.get("metrics", {}) else 0
     s = social["metrics"]["engagement_level"] * 100 if social and "engagement_level" in social.get("metrics", {}) else 0
     
-    # Calculate overall score, avoiding division by zero if all are 0/missing
     count = sum(1 for score in [v, m, s] if score != 0)
     overall = (v + m + s) / count if count > 0 else 0
 
@@ -304,6 +312,7 @@ async def latest_metrics(current_user=Depends(get_current_user)):
     d["timestamp"] = d["timestamp"].isoformat()
     await db.health_metrics.insert_one(d)
 
+    # Returning 'd' which is a Pydantic model_dump is safe from ObjectId issues
     return d
 
 
@@ -316,6 +325,8 @@ async def check_alerts(current_user=Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Database connection error")
         
     uid = current_user["user_id"]
+    
+    # 🔥 FIX: Exclude the native MongoDB '_id' field explicitly
     latest = await db.health_metrics.find_one(
         {"user_id": uid}, {"_id": 0}, sort=[("timestamp", -1)]
     )
@@ -360,12 +371,15 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
         
     uid = current_user["user_id"]
 
+    # 🔥 FIX: Exclude the native MongoDB '_id' field explicitly
     records = await db.health_metrics.find(
         {"user_id": uid}, {"_id": 0}
     ).sort("timestamp", -1).limit(7).to_list(7)
 
     if not records:
         return {"message": "No data available"}
+    
+    # ... (rest of the analysis logic is safe) ...
 
     records = list(reversed(records))
 
@@ -374,10 +388,8 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
     movement = [r.get("movement_score", 0) for r in records]
     social = [r.get("social_score", 0) for r in records]
 
-    # Time series analysis for trend and volatility
     X = np.arange(len(overall)).reshape(-1, 1)
     
-    # Check if there are enough points for regression and ensure non-zero values
     if len(overall) > 1 and sum(overall) != 0:
         slope = round(LinearRegression().fit(X, overall).coef_[0], 3)
     else:
@@ -385,7 +397,6 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
         
     vol = round(np.std(overall), 3)
 
-    # Anomaly detection (last score significantly below average)
     mean_vocal = statistics.mean(vocal) if vocal else 0
     mean_movement = statistics.mean(movement) if movement else 0
     mean_social = statistics.mean(social) if social else 0
@@ -396,11 +407,10 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
         "social_anomaly": social[-1] < (mean_social - 10) if mean_social > 0 else False,
     }
 
-    # Custom Risk Score calculation
     current_overall_score = overall[-1] if overall else 100
     risk_score = (
-        (100 - current_overall_score) * 0.5 +  # Weighting current status
-        (vol * 2) +                           # Weighting volatility
+        (100 - current_overall_score) * 0.5 + 
+        (vol * 2) +                           
         (10 if anomalies["movement_anomaly"] else 0) +
         (10 if anomalies["vocal_anomaly"] else 0)
     )
@@ -465,13 +475,16 @@ async def patients(current_user=Depends(get_current_user)):
         {"role": "patient"}, {"_id": 0, "password_hash": 0}
     ).to_list(500)
 
-    # Attach latest metrics for each patient
-    for p in pts:
+    # 🔥 FIX: Sanitize all patient documents to convert '_id' to string
+    sanitized_pts = [sanitize_mongo_doc(p) for p in pts]
+
+    # Attach latest metrics for each patient (metrics query is safe as it excludes '_id': 0)
+    for p in sanitized_pts:
         p["latest_metrics"] = await db.health_metrics.find_one(
             {"user_id": p["id"]}, {"_id": 0}, sort=[("timestamp", -1)]
         )
 
-    return pts
+    return sanitized_pts
 
 
 @api_router.get("/research/statistics")
@@ -486,6 +499,7 @@ async def stats(current_user=Depends(get_current_user)):
     sensor = await db.sensor_data.count_documents({})
     alerts = await db.tbi_alerts.count_documents({})
 
+    # 🔥 FIX: Exclude the native MongoDB '_id' field explicitly
     recents = await db.health_metrics.find(
         {}, {"_id": 0}
     ).sort("timestamp", -1).limit(100).to_list(100)
@@ -519,11 +533,10 @@ async def root():
 app.include_router(api_router)
 
 # -------------------------------------------------------
-# 🔥 FINAL CORS CONFIGURATION — FIXES THE ORIGINAL NETLIFY/RENDER ERROR
+# CORS Configuration (Fixes original Netlify/Render error)
 # -------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    # Allow the Netlify frontend origin (and common localhost ports for testing)
     allow_origins=[
         "https://neuro-sense-ai.netlify.app",
         "http://localhost:3000",
@@ -535,7 +548,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Render needs this for OPTIONS (preflight) requests
 @app.options("/{full_path:path}")
 async def preflight(full_path: str):
     return {"message": "OK"}
@@ -548,3 +560,7 @@ async def preflight(full_path: str):
 async def shutdown():
     if client:
         client.close()
+
+# -------------------------------------------------------
+# Removed local uvicorn.run block to fix Render Port Timeout
+# -------------------------------------------------------
