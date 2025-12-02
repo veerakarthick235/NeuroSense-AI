@@ -1,0 +1,80 @@
+/* NeuroSense AI - Modern Biocybernetic Theme */
+
+.hero-gradient {
+    background: linear-gradient(135deg, #030712 0%, #111827 100%);
+}
+
+.glass-card {
+    background: rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(24px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.glass-card:hover {
+    border-color: rgba(0, 240, 255, 0.3);
+}
+
+.neon-border {
+    border: 1px solid rgba(0, 240, 255, 0.5);
+    box-shadow: 0 0 20px rgba(0, 240, 255, 0.2);
+}
+
+.text-glow {
+    text-shadow: 0 0 20px rgba(0, 240, 255, 0.5);
+}
+
+/* Recharts customization */
+.recharts-wrapper {
+    filter: drop-shadow(0 4px 20px rgba(0, 240, 255, 0.15));
+}
+
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line {
+    opacity: 0.1;
+}
+
+/* Button Hover Effects */
+.btn-primary {
+    background: #00F0FF;
+    color: #000;
+    font-weight: 700;
+    transition: all 0.3s ease;
+}
+
+.btn-primary:hover {
+    box-shadow: 0 0 30px rgba(0, 240, 255, 0.5);
+    transform: translateY(-2px);
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #0B0F19;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(0, 240, 255, 0.3);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 240, 255, 0.5);
+}
+
+/* Loading animation */
+@keyframes pulse-glow {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.5;
+    }
+}
+
+.pulse-glow {
+    animation: pulse-glow 2s ease-in-out infinite;
+}

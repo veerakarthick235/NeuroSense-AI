@@ -1,0 +1,181 @@
+{
+  "identity": {
+    "name": "NeuroSense AI",
+    "persona": "E1: The Anti-AI Designer",
+    "tone": "Futuristic, Clinical, Precision, Biocybernetic",
+    "principles": [
+      "Fusion over Imitation: Mix Medical Imaging with Cyberpunk HUDs.",
+      "Emotion First: Trust (Dark/Stable) + Urgency (Neon Alerts).",
+      "Content is King: Data is the art. Visualize it beautifully.",
+      "Zoom In: Focus on micro-interactions and data granularity.",
+      "Negative Space: Use deep black voids to make neon pop."
+    ]
+  },
+  "typography": {
+    "fonts": {
+      "heading": {
+        "family": "Outfit",
+        "weights": ["400", "600", "800"],
+        "usage": "Headings, Hero Text, Big Numbers",
+        "fallback": "sans-serif"
+      },
+      "body": {
+        "family": "Plus Jakarta Sans",
+        "weights": ["400", "500", "700"],
+        "usage": "Paragraphs, UI Labels, Navigation",
+        "fallback": "sans-serif"
+      },
+      "mono": {
+        "family": "JetBrains Mono",
+        "weights": ["400"],
+        "usage": "Data Tables, Code Snippets, Coordinates",
+        "fallback": "monospace"
+      }
+    },
+    "rules": [
+      "NEVER use Inter for headings.",
+      "Headings > 32px must use tracking-tight.",
+      "Overlines must be Uppercase + tracking-widest + text-xs.",
+      "Use font-light for large display text to feel elegant/tech."
+    ]
+  },
+  "colors": {
+    "palette": {
+      "background": {
+        "default": "#030712",
+        "paper": "#0B0F19",
+        "subtle": "#111827"
+      },
+      "primary": {
+        "main": "#00F0FF",
+        "glow": "0 0 20px rgba(0, 240, 255, 0.5)",
+        "text": "#000000"
+      },
+      "secondary": {
+        "main": "#7C3AED",
+        "glow": "0 0 20px rgba(124, 58, 237, 0.5)"
+      },
+      "accent": {
+        "success": "#10B981",
+        "warning": "#F59E0B",
+        "error": "#EF4444",
+        "info": "#3B82F6"
+      },
+      "text": {
+        "primary": "#F9FAFB",
+        "secondary": "#9CA3AF",
+        "muted": "#4B5563"
+      }
+    },
+    "gradients": {
+      "hero": "linear-gradient(135deg, #030712 0%, #111827 100%)",
+      "glass": "linear-gradient(180deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.01) 100%)",
+      "beam": "linear-gradient(90deg, transparent, #00F0FF, transparent)"
+    },
+    "rules": [
+      "NO generic full-screen gradients.",
+      "Use gradients only for borders, text clips, or subtle glows.",
+      "Backgrounds must be deep black/gray, not pure black (#000000) unless for OLED contrast.",
+      "FORBIDDEN: Teal Green (#1B93A4) for dashboards."
+    ]
+  },
+  "layout": {
+    "spacing_scale": "Generous (2x standard). Use p-8, p-12 for sections.",
+    "radius": {
+      "default": "0.5rem",
+      "card": "1rem",
+      "button": "9999px"
+    },
+    "grids": {
+      "marketing": {
+        "name": "The Tetris Grid",
+        "classes": "grid grid-cols-1 md:grid-cols-12 gap-8",
+        "rules": "Asymmetry is key. Mix col-span-8 with col-span-4."
+      },
+      "dashboard": {
+        "name": "The Control Room",
+        "classes": "grid grid-cols-1 md:grid-cols-4 gap-4",
+        "rules": "Dense. No gaps. Use h-full to stretch widgets."
+      }
+    }
+  },
+  "components": {
+    "cards": {
+      "style": "Glassmorphism",
+      "classes": "bg-black/40 backdrop-blur-xl border border-white/10 shadow-2xl",
+      "hover": "hover:border-primary/50 transition-colors duration-300"
+    },
+    "buttons": {
+      "primary": "bg-primary text-black font-bold hover:shadow-[0_0_20px_rgba(0,240,255,0.4)] transition-all",
+      "secondary": "bg-white/5 border border-white/10 hover:bg-white/10 text-white"
+    },
+    "inputs": {
+      "style": "Neo-Brutalist Tech",
+      "classes": "bg-black/50 border-white/20 focus:border-primary focus:ring-1 focus:ring-primary"
+    },
+    "charts": {
+      "library": "Recharts (via Shadcn)",
+      "style": "Holographic",
+      "rules": "Use strokeWidth={2}. Add drop-shadow filter to lines. Hide grid lines or make them extremely subtle (opacity 0.1)."
+    }
+  },
+  "assets": {
+    "icons": {
+      "primary": "lucide-react",
+      "secondary": "@phosphor-icons/react (Duotone for marketing)",
+      "installation": "yarn add lucide-react @phosphor-icons/react"
+    },
+    "images": {
+      "hero_brain": {
+        "url": "https://images.unsplash.com/photo-1674027215016-0a4abfdbf1cc?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzV8MHwxfHNlYXJjaHwyfHxmdXR1cmlzdGljJTIwYnJhaW4lMjBzY2FuJTIwaG9sb2dyYW0lMjBkYXRhfGVufDB8fHx8MTc2NDU5MzQ4NXww&ixlib=rb-4.1.0&q=85",
+        "alt": "Holographic Brain Model",
+        "usage": "Hero Section Background or Floating Element"
+      },
+      "researcher_lab": {
+        "url": "https://images.unsplash.com/photo-1581595220921-eec2071e5159?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1ODF8MHwxfHNlYXJjaHwzfHxtZWRpY2FsJTIwcmVzZWFyY2hlciUyMGRhcmslMjBsYWIlMjBmdXR1cmlzdGljJTIwc2NyZWVuc3xlbnwwfHx8fDE3NjQ1OTM0ODd8MA&ixlib=rb-4.1.0&q=85",
+        "alt": "Researcher in Dark Lab",
+        "usage": "About Page or Research Portal Entry"
+      },
+      "neural_network": {
+        "url": "https://images.unsplash.com/photo-1764336312138-14a5368a6cd3?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzl8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMG5ldXJhbCUyMG5ldHdvcmslMjBnbG93aW5nJTIwYmx1ZSUyMHB1cnBsZXxlbnwwfHx8fDE3NjQ1OTM0OTB8MA&ixlib=rb-4.1.0&q=85",
+        "alt": "Neon Neural Network",
+        "usage": "AI Features Section Background"
+      },
+      "abstract_lines": {
+        "url": "https://images.unsplash.com/photo-1647356161576-4e80c6619a0e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzl8MHwxfHNlYXJjaHw0fHxhYnN0cmFjdCUyMG5ldXJhbCUyMG5ldHdvcmslMjBnbG93aW5nJTIwYmx1ZSUyMHB1cnBsZXxlbnwwfHx8fDE3NjQ1OTM0OTB8MA&ixlib=rb-4.1.0&q=85",
+        "alt": "Abstract Blue Lines",
+        "usage": "Subtle texture overlay for dark backgrounds"
+      }
+    }
+  },
+  "motion": {
+    "library": "framer-motion",
+    "presets": {
+      "fade_up": {
+        "initial": { "opacity": 0, "y": 20 },
+        "animate": { "opacity": 1, "y": 0 },
+        "transition": { "duration": 0.5 }
+      },
+      "scale_in": {
+        "initial": { "opacity": 0, "scale": 0.9 },
+        "animate": { "opacity": 1, "scale": 1 },
+        "transition": { "duration": 0.4 }
+      },
+      "hover_glow": {
+        "whileHover": { "boxShadow": "0 0 20px rgba(0, 240, 255, 0.3)" }
+      }
+    }
+  },
+  "universal_guidelines": [
+    "Avoid 'AI Slop': No generic centered layouts. Use asymmetry.",
+    "Dark Mode Only: The app should feel like a cockpit at night.",
+    "Micro-Interactions: Every button click, hover, and focus must have feedback.",
+    "Data-Test-ID: All interactive elements must have data-testid attributes.",
+    "No Transparent Backgrounds: Use blur/scrim for overlays.",
+    "Use 'sonner' for toasts.",
+    "Use 'lucide-react' for icons by default.",
+    "Export components as named exports.",
+    "Export pages as default exports."
+  ],
+  "instructions_to_main_agent": "You are building the NeuroSense AI frontend. Follow these guidelines strictly. Start by setting up the global CSS variables in index.css to match the 'colors' section. Then, install the required fonts (Outfit, Plus Jakarta Sans, JetBrains Mono) via Google Fonts import in index.css. Build the Layout wrapper first, then the Landing Page, then the Dashboards. Use the provided image URLs for the respective sections."
+}
