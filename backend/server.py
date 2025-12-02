@@ -548,12 +548,3 @@ async def preflight(full_path: str):
 async def shutdown():
     if client:
         client.close()
-
-# -------------------------------------------------------
-# 🚀 Run the Application (For local development only)
-# -------------------------------------------------------
-if __name__ == "__main__":
-    # Note: On Render, the start command (e.g., 'uvicorn server:app --host 0.0.0.0 --port 10000') 
-    # executes the server directly, bypassing this if block.
-    # This block is only for testing the server locally.
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
