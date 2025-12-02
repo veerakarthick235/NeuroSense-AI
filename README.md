@@ -1,6 +1,7 @@
 # NeuroSense AI – Full Stack Application
 
-This is the complete README for the NeuroSense AI project including **backend (FastAPI)** and **frontend (React + CRACO)**.
+NeuroSense AI is an advanced multimodal cognitive-health monitoring system powered by AI, machine learning, and sensor-driven behavioral analytics.
+It enables patients, clinicians, and researchers to track cognitive wellness trends, detect anomalies, and receive real-time insights into potential neurological risks such as Traumatic Brain Injury (TBI).
 
 ## 📌 Project Overview
 NeuroSense AI is a multimodal cognitive‑health monitoring system that uses:
