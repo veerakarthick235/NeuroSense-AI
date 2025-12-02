@@ -17,8 +17,6 @@ import uuid
 import random
 import logging
 import os
-import uvicorn
-from bson import ObjectId # <-- IMPORTED FOR ID SANITIZATION
 
 # -------------------------------------------------------
 # Load environment variables
@@ -26,20 +24,12 @@ from bson import ObjectId # <-- IMPORTED FOR ID SANITIZATION
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
-# Ensure environment variables are loaded
-MONGO_URL = os.environ.get("MONGO_URL")
-DB_NAME = os.environ.get("DB_NAME")
-JWT_SECRET = os.environ.get("JWT_SECRET")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+MONGO_URL = os.environ["MONGO_URL"]
+DB_NAME = os.environ["DB_NAME"]
+JWT_SECRET = os.environ["JWT_SECRET"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
-if not all([MONGO_URL, DB_NAME, JWT_SECRET]):
-    logging.warning("Missing critical environment variables!")
-
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-else:
-    logging.warning("GEMINI_API_KEY not found. AI insights will be disabled.")
-
+genai.configure(api_key=GEMINI_API_KEY)
 
 # -------------------------------------------------------
 # FastAPI App
@@ -51,8 +41,8 @@ security = HTTPBearer()
 # -------------------------------------------------------
 # Database
 # -------------------------------------------------------
-client = AsyncIOMotorClient(MONGO_URL) if MONGO_URL else None
-db = client[DB_NAME] if client and DB_NAME else None
+client = AsyncIOMotorClient(MONGO_URL)
+db = client[DB_NAME]
 
 # -------------------------------------------------------
 # Models
@@ -140,32 +130,14 @@ def create_token(user_id: str, email: str, role: str):
         "role": role,
         "exp": datetime.now(timezone.utc) + timedelta(days=7),
     }
-    if not JWT_SECRET:
-         raise RuntimeError("JWT secret not configured.")
-         
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
-        if not JWT_SECRET:
-             raise HTTPException(status_code=500, detail="Server misconfiguration: JWT secret not set.")
-        
         return jwt.decode(credentials.credentials, JWT_SECRET, algorithms=["HS256"])
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Invalid authentication token")
-    except Exception:
+    except:
         raise HTTPException(status_code=401, detail="Invalid authentication")
-
-# 🔥 NEW HELPER FUNCTION TO SANITIZE MONGO DOCUMENTS
-def sanitize_mongo_doc(doc):
-    """Converts MongoDB's native '_id' (ObjectId) to a string 'id' for JSON serialization."""
-    if doc and isinstance(doc, dict):
-        if "_id" in doc and isinstance(doc["_id"], ObjectId):
-            # Replace '_id' with 'id' as a string and remove the original
-            doc["id"] = str(doc.pop("_id"))
-        return doc
-    return doc
 
 
 def generate_simulated_sensor_data(data_type: str):
@@ -195,14 +167,12 @@ def generate_simulated_sensor_data(data_type: str):
             "engagement_level": round(random.uniform(0.4, 1.0), 2),
         }
 
+
 # -------------------------------------------------------
 # Auth
 # -------------------------------------------------------
 @api_router.post("/auth/register")
 async def register(data: UserRegister):
-    if db is None:
-        raise HTTPException(status_code=500, detail="Database connection error")
-
     existing = await db.users.find_one({"email": data.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -215,53 +185,53 @@ async def register(data: UserRegister):
     )
 
     d = user.model_dump()
-    # The 'id' field is already a str from the User model's default factory
     d["created_at"] = d["created_at"].isoformat()
     await db.users.insert_one(d)
 
+    token = create_token(user.id, user.email, user.role)
     return {
-        "token": create_token(user.id, user.email, user.role),
+        "token": token,
         "user": {"id": user.id, "email": user.email, "name": user.name, "role": user.role},
     }
 
 
 @api_router.post("/auth/login")
 async def login(data: UserLogin):
-    if db is None:
-        raise HTTPException(status_code=500, detail="Database connection error")
-
     user = await db.users.find_one({"email": data.email})
     if not user or not verify_password(data.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
-    # 🔥 FIX: Sanitize the MongoDB document before returning it
-    sanitized_user = sanitize_mongo_doc(user)
 
+    token = create_token(user["id"], user["email"], user["role"])
     return {
-        "token": create_token(sanitized_user["id"], sanitized_user["email"], sanitized_user["role"]),
+        "token": token,
         "user": {
-            "id": sanitized_user["id"],
-            "email": sanitized_user["email"],
-            "name": sanitized_user["name"],
-            "role": sanitized_user["role"],
+            "id": user["id"],
+            "email": user["email"],
+            "name": user["name"],
+            "role": user["role"],
         },
     }
 
 
+@api_router.get("/auth/me")
+async def me(current_user=Depends(get_current_user)):
+    return await db.users.find_one(
+        {"id": current_user["user_id"]}, {"_id": 0, "password_hash": 0}
+    )
+
+
 # -------------------------------------------------------
-# Sensor simulation
+# Sensor Simulation
 # -------------------------------------------------------
 @api_router.post("/data/sensors/simulate")
 async def simulate(current_user=Depends(get_current_user)):
-    if db is None:
-        raise HTTPException(status_code=500, detail="Database connection error")
-        
     uid = current_user["user_id"]
     out = []
 
     for typ in ["vocal", "movement", "social"]:
         metrics = generate_simulated_sensor_data(typ)
         obj = SensorData(user_id=uid, data_type=typ, metrics=metrics)
+
         d = obj.model_dump()
         d["timestamp"] = d["timestamp"].isoformat()
         await db.sensor_data.insert_one(d)
@@ -275,30 +245,21 @@ async def simulate(current_user=Depends(get_current_user)):
 # -------------------------------------------------------
 @api_router.get("/metrics/latest")
 async def latest_metrics(current_user=Depends(get_current_user)):
-    if db is None:
-        raise HTTPException(status_code=500, detail="Database connection error")
-        
     uid = current_user["user_id"]
 
-    async def get_latest(type):
-        # We fetch only the metrics, timestamp, and user_id here, excluding the native '_id'
-        doc = await db.sensor_data.find_one(
-            {"user_id": uid, "data_type": type}, {"_id": 0, "metrics": 1, "timestamp": 1, "user_id": 1}, sort=[("timestamp", -1)]
+    async def get_latest(typ):
+        return await db.sensor_data.find_one(
+            {"user_id": uid, "data_type": typ}, {"_id": 0}, sort=[("timestamp", -1)]
         )
-        return doc
 
     vocal = await get_latest("vocal")
     movement = await get_latest("movement")
     social = await get_latest("social")
 
-    # Use 0 if data is missing
-    v = vocal["metrics"]["voice_quality"] * 100 if vocal and "voice_quality" in vocal.get("metrics", {}) else 0
-    m = movement["metrics"]["gait_stability"] * 100 if movement and "gait_stability" in movement.get("metrics", {}) else 0
-    s = social["metrics"]["engagement_level"] * 100 if social and "engagement_level" in social.get("metrics", {}) else 0
-    
-    count = sum(1 for score in [v, m, s] if score != 0)
-    overall = (v + m + s) / count if count > 0 else 0
-
+    v = vocal["metrics"]["voice_quality"] * 100 if vocal else 0
+    m = movement["metrics"]["gait_stability"] * 100 if movement else 0
+    s = social["metrics"]["engagement_level"] * 100 if social else 0
+    overall = (v + m + s) / 3
 
     obj = HealthMetrics(
         user_id=uid,
@@ -312,8 +273,22 @@ async def latest_metrics(current_user=Depends(get_current_user)):
     d["timestamp"] = d["timestamp"].isoformat()
     await db.health_metrics.insert_one(d)
 
-    # Returning 'd' which is a Pydantic model_dump is safe from ObjectId issues
     return d
+
+
+@api_router.get("/metrics/history")
+async def history(days: int = 7, current_user=Depends(get_current_user)):
+    uid = current_user["user_id"]
+    start = datetime.now(timezone.utc) - timedelta(days=days)
+
+    return (
+        await db.health_metrics.find(
+            {"user_id": uid, "timestamp": {"$gte": start.isoformat()}},
+            {"_id": 0},
+        )
+        .sort("timestamp", 1)
+        .to_list(500)
+    )
 
 
 # -------------------------------------------------------
@@ -321,12 +296,7 @@ async def latest_metrics(current_user=Depends(get_current_user)):
 # -------------------------------------------------------
 @api_router.post("/alerts/check")
 async def check_alerts(current_user=Depends(get_current_user)):
-    if db is None:
-        raise HTTPException(status_code=500, detail="Database connection error")
-        
     uid = current_user["user_id"]
-    
-    # 🔥 FIX: Exclude the native MongoDB '_id' field explicitly
     latest = await db.health_metrics.find_one(
         {"user_id": uid}, {"_id": 0}, sort=[("timestamp", -1)]
     )
@@ -338,10 +308,10 @@ async def check_alerts(current_user=Depends(get_current_user)):
 
     if score < 60:
         sev = "high"
-        msg = "Significant cognitive decline detected. Immediate review recommended."
+        msg = "Significant cognitive decline detected."
     elif score < 75:
         sev = "medium"
-        msg = "Moderate cognitive deviation detected. Trend monitoring is advised."
+        msg = "Moderate cognitive deviation detected."
     else:
         return {"alerts_created": 0, "alerts": []}
 
@@ -360,92 +330,68 @@ async def check_alerts(current_user=Depends(get_current_user)):
 
 
 # -------------------------------------------------------
-# AI Insight (Gemini)
+# Gemini Insights
 # -------------------------------------------------------
 @api_router.post("/insights/generate")
-async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depends(get_current_user)):
-    if db is None:
-        raise HTTPException(status_code=500, detail="Database connection error")
-    if not GEMINI_API_KEY:
-         raise HTTPException(status_code=503, detail="AI service is unavailable due to missing API key.")
-        
+async def advanced_ai_insight(
+    request: GenerateInsightRequest, current_user=Depends(get_current_user)
+):
     uid = current_user["user_id"]
 
-    # 🔥 FIX: Exclude the native MongoDB '_id' field explicitly
-    records = await db.health_metrics.find(
-        {"user_id": uid}, {"_id": 0}
-    ).sort("timestamp", -1).limit(7).to_list(7)
+    records = (
+        await db.health_metrics.find({"user_id": uid}, {"_id": 0})
+        .sort("timestamp", -1)
+        .limit(7)
+        .to_list(7)
+    )
 
     if not records:
         return {"message": "No data available"}
-    
-    # ... (rest of the analysis logic is safe) ...
 
     records = list(reversed(records))
 
-    overall = [r.get("overall_score", 0) for r in records]
-    vocal = [r.get("vocal_score", 0) for r in records]
-    movement = [r.get("movement_score", 0) for r in records]
-    social = [r.get("social_score", 0) for r in records]
+    overall = [r["overall_score"] for r in records]
+    vocal = [r["vocal_score"] for r in records]
+    movement = [r["movement_score"] for r in records]
+    social = [r["social_score"] for r in records]
 
     X = np.arange(len(overall)).reshape(-1, 1)
-    
-    if len(overall) > 1 and sum(overall) != 0:
-        slope = round(LinearRegression().fit(X, overall).coef_[0], 3)
-    else:
-        slope = 0
-        
+    slope = round(LinearRegression().fit(X, overall).coef_[0], 3)
     vol = round(np.std(overall), 3)
 
-    mean_vocal = statistics.mean(vocal) if vocal else 0
-    mean_movement = statistics.mean(movement) if movement else 0
-    mean_social = statistics.mean(social) if social else 0
-
     anomalies = {
-        "vocal_anomaly": vocal[-1] < (mean_vocal - 10) if mean_vocal > 0 else False,
-        "movement_anomaly": movement[-1] < (mean_movement - 10) if mean_movement > 0 else False,
-        "social_anomaly": social[-1] < (mean_social - 10) if mean_social > 0 else False,
+        "vocal_anomaly": vocal[-1] < (statistics.mean(vocal) - 10),
+        "movement_anomaly": movement[-1] < (statistics.mean(movement) - 10),
+        "social_anomaly": social[-1] < (statistics.mean(social) - 10),
     }
 
-    current_overall_score = overall[-1] if overall else 100
     risk_score = (
-        (100 - current_overall_score) * 0.5 + 
-        (vol * 2) +                           
-        (10 if anomalies["movement_anomaly"] else 0) +
-        (10 if anomalies["vocal_anomaly"] else 0)
+        (100 - overall[-1]) * 0.5
+        + (vol * 2)
+        + (10 if anomalies["movement_anomaly"] else 0)
+        + (10 if anomalies["vocal_anomaly"] else 0)
     )
 
-    risk = (
-        "Low" if risk_score < 40 else
-        "Medium" if risk_score < 70 else
-        "High"
-    )
+    risk = "Low" if risk_score < 40 else "Medium" if risk_score < 70 else "High"
 
     prompt = f"""
-    Provide a clinical-style cognitive analysis for a patient based on the following key metrics.
-    
-    The analysis should focus on **trend, stability, and potential risks**.
-    
-    * **Current Overall Score:** {current_overall_score:.1f}
-    * **Trend (Slope over last 7 days):** {slope} (Higher means improving)
-    * **Volatility (Standard Deviation):** {vol} (Higher means less stable)
-    * **Anomalies Detected (Last reading significantly low):**
-        * Vocal: {anomalies["vocal_anomaly"]}
-        * Movement: {anomalies["movement_anomaly"]}
-    * **Calculated Risk Category:** {risk}
-    
-    Based on these data points, summarize the patient's current cognitive stability and provide one actionable recommendation for their care team.
+    Provide a clinical-style cognitive analysis.
+
+    Trend slope: {slope}
+    Volatility: {vol}
+    Anomalies: {anomalies}
+    Risk Score: {risk_score}
+    Risk Category: {risk}
     """
 
     try:
         model = genai.GenerativeModel("models/gemini-2.5-flash")
         response = model.generate_content(prompt)
-        text = response.text.strip()
 
         obj = AIInsight(
             user_id=uid,
             insight_type="advanced_analysis",
-            content=text,
+            content=response.text.strip(),
         )
 
         d = obj.model_dump()
@@ -455,69 +401,60 @@ async def advanced_ai_insight(request: GenerateInsightRequest, current_user=Depe
         return d
 
     except Exception as e:
-        logging.error(f"Insight generation failed: {e}")
+        logging.error(str(e))
         raise HTTPException(status_code=500, detail="Insight generation failed")
 
 
 # -------------------------------------------------------
-# Researcher
+# Researcher Endpoints
 # -------------------------------------------------------
 @api_router.get("/research/patients")
 async def patients(current_user=Depends(get_current_user)):
-    if db is None:
-        raise HTTPException(status_code=500, detail="Database connection error")
-        
     if current_user["role"] != "researcher":
-        raise HTTPException(status_code=403, detail="Permission denied")
+        raise HTTPException(status_code=403)
 
-    # Fetch all patients
     pts = await db.users.find(
         {"role": "patient"}, {"_id": 0, "password_hash": 0}
     ).to_list(500)
 
-    # 🔥 FIX: Sanitize all patient documents to convert '_id' to string
-    sanitized_pts = [sanitize_mongo_doc(p) for p in pts]
-
-    # Attach latest metrics for each patient (metrics query is safe as it excludes '_id': 0)
-    for p in sanitized_pts:
+    for p in pts:
         p["latest_metrics"] = await db.health_metrics.find_one(
             {"user_id": p["id"]}, {"_id": 0}, sort=[("timestamp", -1)]
         )
 
-    return sanitized_pts
+    return pts
 
 
 @api_router.get("/research/statistics")
 async def stats(current_user=Depends(get_current_user)):
-    if db is None:
-        raise HTTPException(status_code=500, detail="Database connection error")
-        
     if current_user["role"] != "researcher":
-        raise HTTPException(status_code=403, detail="Permission denied")
+        raise HTTPException(status_code=403)
 
     total = await db.users.count_documents({"role": "patient"})
-    sensor = await db.sensor_data.count_documents({})
-    alerts = await db.tbi_alerts.count_documents({})
+    sensor_count = await db.sensor_data.count_documents({})
+    alert_count = await db.tbi_alerts.count_documents({})
 
-    # 🔥 FIX: Exclude the native MongoDB '_id' field explicitly
-    recents = await db.health_metrics.find(
-        {}, {"_id": 0}
-    ).sort("timestamp", -1).limit(100).to_list(100)
+    recents = (
+        await db.health_metrics.find({}, {"_id": 0})
+        .sort("timestamp", -1)
+        .limit(100)
+        .to_list(100)
+    )
 
-    avg = {"overall": 0, "vocal": 0, "movement": 0, "social": 0}
     if recents:
-        count = len(recents)
         avg = {
-            "overall": sum(m.get("overall_score", 0) for m in recents) / count,
-            "vocal": sum(m.get("vocal_score", 0) for m in recents) / count,
-            "movement": sum(m.get("movement_score", 0) for m in recents) / count,
-            "social": sum(m.get("social_score", 0) for m in recents) / count,
+            "overall": sum(r["overall_score"] for r in recents) / len(recents),
+            "vocal": sum(r["vocal_score"] for r in recents) / len(recents),
+            "movement": sum(r["movement_score"] for r in recents) / len(recents),
+            "social": sum(r["social_score"] for r in recents) / len(recents),
         }
+    else:
+        avg = {"overall": 0, "vocal": 0, "movement": 0, "social": 0}
 
     return {
         "total_patients": total,
-        "total_sensor_readings": sensor,
-        "total_alerts": alerts,
+        "total_sensor_readings": sensor_count,
+        "total_alerts": alert_count,
         "average_scores": avg,
     }
 
@@ -533,24 +470,23 @@ async def root():
 app.include_router(api_router)
 
 # -------------------------------------------------------
-# CORS Configuration (Fixes original Netlify/Render error)
+# PRODUCTION CORS — FINAL FIX FOR NETLIFY + RENDER
 # -------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://neuro-sense-ai.netlify.app",
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:8000"
     ],
+    allow_origin_regex=r"https:\/\/[a-zA-Z0-9\-]+\.netlify\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-@app.options("/{full_path:path}")
-async def preflight(full_path: str):
-    return {"message": "OK"}
+# Render needs OPTIONS for everything
+@app.options("/{rest_of_path:path}")
+async def preflight_handler(rest_of_path: str):
+    return {"status": "ok"}
 
 
 # -------------------------------------------------------
@@ -558,9 +494,4 @@ async def preflight(full_path: str):
 # -------------------------------------------------------
 @app.on_event("shutdown")
 async def shutdown():
-    if client:
-        client.close()
-
-# -------------------------------------------------------
-# Removed local uvicorn.run block to fix Render Port Timeout
-# -------------------------------------------------------
+    client.close()
