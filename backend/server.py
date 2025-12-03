@@ -19,6 +19,7 @@ import random
 import logging
 import os
 import json
+from bson.objectid import ObjectId # Import ObjectId for type checking
 
 # -------------------------------------------------------
 # Configuration & Environment Variables
@@ -50,7 +51,7 @@ client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
 # -------------------------------------------------------
-# Models
+# Models - (No changes needed here, assuming correct structure)
 # -------------------------------------------------------
 class User(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -110,7 +111,7 @@ class GenerateInsightRequest(BaseModel):
     user_id: str
 
 # -------------------------------------------------------
-# Utility Functions
+# Utility Functions (CRUCIAL FIX HERE)
 # -------------------------------------------------------
 def hash_password(password: str):
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -134,12 +135,8 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         raise HTTPException(status_code=401, detail="Invalid authentication")
 
 def generate_simulated_sensor_data(data_type: str):
-    # Base simulation logic as provided
     if data_type == "vocal":
-        # Introduce randomness with a bias towards 'normal' (e.g., score 75-100)
         base_quality = random.uniform(0.75, 1.0)
-        
-        # Randomly introduce a drop for variation/alerts ~20% of the time
         if random.random() < 0.2:
             base_quality = random.uniform(0.5, 0.75)
             
@@ -148,7 +145,7 @@ def generate_simulated_sensor_data(data_type: str):
             "pitch_variance": round(random.uniform(10, 50), 2),
             "speech_rate": round(random.uniform(100, 180), 2),
             "pause_frequency": round(random.uniform(0.1, 0.5), 2),
-            "voice_quality": round(base_quality, 2), # Score generator will use this
+            "voice_quality": round(base_quality, 2),
         }
     elif data_type == "movement":
         base_stability = random.uniform(0.75, 1.0)
@@ -162,7 +159,7 @@ def generate_simulated_sensor_data(data_type: str):
             "gyro_x": round(random.uniform(-1, 1), 3),
             "gyro_y": round(random.uniform(-1, 1), 3),
             "gyro_z": round(random.uniform(-1, 1), 3),
-            "gait_stability": round(base_stability, 2), # Score generator will use this
+            "gait_stability": round(base_stability, 2),
         }
     else:
         base_engagement = random.uniform(0.75, 1.0)
@@ -173,24 +170,43 @@ def generate_simulated_sensor_data(data_type: str):
             "interaction_count": random.randint(5, 30),
             "response_time_avg": round(random.uniform(1, 5), 2),
             "sentiment_score": round(random.uniform(-0.5, 1.0), 2),
-            "engagement_level": round(base_engagement, 2), # Score generator will use this
+            "engagement_level": round(base_engagement, 2),
         }
 
-# Helper to convert MongoDB documents to serializable format
+
 def serialize_doc(doc):
-    if doc:
-        doc.pop('_id', None)
-        if 'timestamp' in doc and isinstance(doc['timestamp'], datetime):
-            doc['timestamp'] = doc['timestamp'].isoformat()
-        if 'created_at' in doc and isinstance(doc['created_at'], datetime):
-            doc['created_at'] = doc['created_at'].isoformat()
-        
-        # Recursively handle nested dictionaries like 'metrics' in alerts
-        if 'metrics' in doc and isinstance(doc['metrics'], dict):
-            if 'timestamp' in doc['metrics'] and isinstance(doc['metrics']['timestamp'], datetime):
-                 doc['metrics']['timestamp'] = doc['metrics']['timestamp'].isoformat()
-        
+    """
+    Recursively serialize MongoDB document for JSON response.
+    Specifically handles ObjectId and datetime objects.
+    """
+    if doc is None:
+        return None
+    
+    # Check if the doc is already a model instance (dict) or a raw MongoDB document
+    if not isinstance(doc, dict):
+        # Assuming Pydantic model dump or similar object, convert to dict first
+        try:
+            doc = doc.model_dump(by_alias=True, exclude_none=True)
+        except AttributeError:
+            pass # Already a dictionary
+
+    # FIX: Convert MongoDB's ObjectId to string
+    if '_id' in doc and isinstance(doc['_id'], ObjectId):
+        doc['id'] = str(doc.pop('_id')) # Use the existing 'id' field, if available, or just remove _id
+
+    # Handle datetime and recursive serialization for nested dicts/lists
+    for key, value in doc.items():
+        if isinstance(value, datetime):
+            doc[key] = value.isoformat()
+        elif isinstance(value, dict):
+            doc[key] = serialize_doc(value)
+        elif isinstance(value, list):
+            doc[key] = [serialize_doc(item) for item in value]
+        elif isinstance(value, ObjectId):
+            doc[key] = str(value)
+
     return doc
+
 
 # -------------------------------------------------------
 # Auth Endpoints
@@ -210,6 +226,7 @@ async def register(data: UserRegister):
 
     d = user.model_dump(by_alias=True, exclude_none=True)
     d["created_at"] = d["created_at"].isoformat()
+    # MongoDB handles its own _id, relying on our generated 'id' field for application logic
     await db.users.insert_one(d)
 
     token = create_token(user.id, user.email, user.role)
@@ -248,10 +265,8 @@ async def me(current_user=Depends(get_current_user)):
 # -------------------------------------------------------
 @api_router.post("/data/sensors/simulate")
 async def simulate(current_user=Depends(get_current_user)):
-    """Generates 3 new sensor data points, calculates a new HealthMetric, and checks for Alerts."""
     uid = current_user["user_id"]
 
-    # Rate limiting check: prevent creation if a metric already exists in the last 30 seconds
     thirty_seconds_ago = datetime.now(timezone.utc) - timedelta(seconds=30)
     recent_metric = await db.health_metrics.find_one({
         "user_id": uid,
@@ -299,6 +314,9 @@ async def simulate(current_user=Depends(get_current_user)):
     # 3. Check and insert alerts for the new metrics
     alerts_list = []
     
+    severity = None
+    message = None
+    
     if overall < 60:
         severity = "high"
         message = "Critical decline detected across multiple metrics. Immediate medical consultation recommended."
@@ -308,9 +326,7 @@ async def simulate(current_user=Depends(get_current_user)):
     elif overall < 85:
         severity = "low"
         message = "Slight fluctuations detected. Continue monitoring daily activity."
-    else:
-        severity = None
-
+    
     if severity:
         alert = TBIAlert(
             user_id=uid,
@@ -333,15 +349,14 @@ async def simulate(current_user=Depends(get_current_user)):
 # -------------------------------------------------------
 @api_router.get("/metrics/latest")
 async def get_latest_metrics(current_user=Depends(get_current_user)):
-    """Fetches the latest calculated HealthMetrics for the current user."""
     uid = current_user["user_id"]
 
     latest = await db.health_metrics.find_one(
         {"user_id": uid}, {"_id": 0}, sort=[("timestamp", -1)]
     )
     
-    # Default return structure for a user with no data
     if not latest:
+        # Return default structure if no data exists
         return HealthMetrics(
             user_id=uid,
             vocal_score=0,
@@ -356,7 +371,6 @@ async def get_latest_metrics(current_user=Depends(get_current_user)):
 
 @api_router.get("/metrics/history")
 async def history(days: int = 7, current_user=Depends(get_current_user)):
-    """Fetches the history of HealthMetrics for the last 'days'."""
     uid = current_user["user_id"]
     time_cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
@@ -373,7 +387,6 @@ async def history(days: int = 7, current_user=Depends(get_current_user)):
 # -------------------------------------------------------
 @api_router.get("/alerts")
 async def get_alerts(current_user=Depends(get_current_user)):
-    """Fetches all TBI Alerts for the current user."""
     uid = current_user["user_id"]
     
     cursor = db.tbi_alerts.find(
@@ -384,7 +397,6 @@ async def get_alerts(current_user=Depends(get_current_user)):
 
 @api_router.post("/alerts/check")
 async def check_alerts_manual(current_user=Depends(get_current_user)):
-    """Manually checks the latest metric against alert thresholds and creates an alert if needed."""
     uid = current_user["user_id"]
     latest = await db.health_metrics.find_one(
         {"user_id": uid}, {"_id": 0}, sort=[("timestamp", -1)]
@@ -397,7 +409,6 @@ async def check_alerts_manual(current_user=Depends(get_current_user)):
     alerts_list = []
     current_time = datetime.now(timezone.utc)
     
-    # Check alert conditions
     severity = None
     message = None
     
@@ -409,7 +420,6 @@ async def check_alerts_manual(current_user=Depends(get_current_user)):
         message = "Moderate cognitive deviation detected. Elevated risk."
     
     if severity:
-        # Check if an identical alert exists recently to avoid spamming the DB
         recent_alert = await db.tbi_alerts.find_one({
             "user_id": uid,
             "severity": severity,
@@ -437,7 +447,6 @@ async def check_alerts_manual(current_user=Depends(get_current_user)):
 # -------------------------------------------------------
 @api_router.get("/insights")
 async def get_insights(current_user=Depends(get_current_user)):
-    """Fetches all AI Insights for the current user."""
     uid = current_user["user_id"]
     
     cursor = db.ai_insights.find(
@@ -450,7 +459,6 @@ async def get_insights(current_user=Depends(get_current_user)):
 async def advanced_ai_insight(
     request: GenerateInsightRequest, current_user=Depends(get_current_user)
 ):
-    """Generates a new, advanced AI insight based on the patient's recent history."""
     if current_user["role"] != "patient":
         raise HTTPException(status_code=403, detail="Access denied. Patient role required for insight generation.")
 
@@ -462,7 +470,6 @@ async def advanced_ai_insight(
     # Fetch last 7 days of health metrics
     time_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     
-    # Fetch records and ensure timestamps are parsed as datetime for correct sorting/slicing
     records = (
         await db.health_metrics.find(
             {"user_id": uid, "timestamp": {"$gte": time_cutoff.isoformat()}},
@@ -472,13 +479,12 @@ async def advanced_ai_insight(
         .to_list(7)
     )
 
-    if not records or len(records) < 3: # Require at least 3 points for a meaningful trend
+    if not records or len(records) < 3:
         raise HTTPException(
             status_code=404, 
             detail="Insufficient data. Require at least 3 data points from the last 7 days to generate an insight."
         )
 
-    # Prepare numerical data for linear regression and statistics
     overall_scores = [r["overall_score"] for r in records]
     vocal_scores = [r["vocal_score"] for r in records]
     movement_scores = [r["movement_score"] for r in records]
@@ -486,24 +492,24 @@ async def advanced_ai_insight(
     
     X = np.arange(len(overall_scores)).reshape(-1, 1)
 
-    # Calculate slope (trend)
     try:
         reg = LinearRegression().fit(X, np.array(overall_scores))
         slope = round(reg.coef_[0], 3)
     except Exception:
         slope = 0.0
 
-    # Calculate volatility (standard deviation)
     vol = round(np.std(overall_scores), 3)
 
-    # Anomalies detection (last score much lower than average)
+    avg_vocal = statistics.mean(vocal_scores)
+    avg_movement = statistics.mean(movement_scores)
+    avg_social = statistics.mean(social_scores)
+
     anomalies = {
-        "vocal_anomaly": vocal_scores[-1] < (statistics.mean(vocal_scores) - 10),
-        "movement_anomaly": movement_scores[-1] < (statistics.mean(movement_scores) - 10),
-        "social_anomaly": social_scores[-1] < (statistics.mean(social_scores) - 10),
+        "vocal_anomaly": vocal_scores[-1] < (avg_vocal - 10),
+        "movement_anomaly": movement_scores[-1] < (avg_movement - 10),
+        "social_anomaly": social_scores[-1] < (avg_social - 10),
     }
 
-    # Simplified Risk Calculation
     risk_score = (
         (100 - overall_scores[-1]) * 0.5
         + (vol * 2)
@@ -513,7 +519,10 @@ async def advanced_ai_insight(
 
     risk = "Low" if risk_score < 40 else "Medium" if risk_score < 70 else "High"
     
-    # Prepare the prompt for Gemini
+    last_alert = await db.tbi_alerts.find_one(
+        {"user_id": uid}, {"_id": 0, "message": 1, "severity": 1, "timestamp": 1}, sort=[("timestamp", -1)]
+    )
+
     prompt = f"""
     You are an AI assistant providing a detailed clinical-style cognitive analysis for a patient based on their last {len(records)} health metrics. The goal is to identify trends related to Traumatic Brain Injury (TBI) recovery or decline.
 
@@ -530,6 +539,8 @@ async def advanced_ai_insight(
     - Risk Score: {risk_score:.2f}
     - Risk Category: {risk}
 
+    {f"**Previous Alert:** A {last_alert['severity']} alert was issued on {last_alert['timestamp'].strftime('%Y-%m-%d')} for: {last_alert['message']}" if last_alert else ""}
+
     **Instructions:**
     1. Analyze the provided data, commenting on the trend (improving/declining), stability (volatility), and specific metric areas with anomalies.
     2. Provide a concise summary of the patient's current cognitive status and risk level based on the metrics.
@@ -543,7 +554,7 @@ async def advanced_ai_insight(
 
         obj = AIInsight(
             user_id=uid,
-            insight_type="Advanced Analysis", # Changed to simple string
+            insight_type="Advanced Analysis",
             content=response.text.strip(),
             timestamp=datetime.now(timezone.utc)
         )
@@ -555,9 +566,7 @@ async def advanced_ai_insight(
         return d
 
     except Exception as e:
-        # Log the error for server-side debugging
         logging.error(f"Insight generation failed: {e}")
-        # Raise HTTP exception for client feedback (this is the 500 error seen in console)
         raise HTTPException(status_code=500, detail=f"Insight generation failed due to an external error.")
 
 
@@ -566,28 +575,28 @@ async def advanced_ai_insight(
 # -------------------------------------------------------
 @api_router.get("/research/patients")
 async def patients(current_user=Depends(get_current_user)):
-    """Fetches a list of all patient users and their latest metrics for researchers."""
     if current_user["role"] != "researcher":
         raise HTTPException(status_code=403, detail="Access denied. Researcher role required.")
 
+    # Fetch patients without MongoDB's default _id, but keep the application's 'id'
     pts = await db.users.find(
         {"role": "patient"}, {"_id": 0, "password_hash": 0}
     ).to_list(500)
 
     for p in pts:
-        p_doc = serialize_doc(p)
+        p_doc = serialize_doc(p) # Serialize the user document
+
         latest_metric = await db.health_metrics.find_one(
             {"user_id": p_doc["id"]}, {"_id": 0}, sort=[("timestamp", -1)]
         )
         p_doc["latest_metrics"] = serialize_doc(latest_metric)
-        p.update(p_doc) # Update the original list item with serialized data
+        p.update(p_doc) 
 
     return pts
 
 
 @api_router.get("/research/statistics")
 async def stats(current_user=Depends(get_current_user)):
-    """Provides aggregated statistics over the patient population for researchers."""
     if current_user["role"] != "researcher":
         raise HTTPException(status_code=403, detail="Access denied. Researcher role required.")
 
@@ -621,36 +630,24 @@ async def stats(current_user=Depends(get_current_user)):
 
 @api_router.get("/export/data")
 async def export_data(current_user=Depends(get_current_user)):
-    """Exports all database data related to patients, metrics, alerts, and insights as a single JSON file."""
     if current_user["role"] != "researcher":
         raise HTTPException(status_code=403, detail="Access denied. Researcher role required.")
 
-    all_data = {}
-    
-    # Fetch all data from relevant collections
+    # Fetch all data from relevant collections, explicitly excluding '_id'
     users_cursor = db.users.find({}, {"_id": 0, "password_hash": 0})
-    all_data['users'] = await users_cursor.to_list(length=None)
+    health_metrics_cursor = db.health_metrics.find({}, {"_id": 0})
+    tbi_alerts_cursor = db.tbi_alerts.find({}, {"_id": 0})
+    ai_insights_cursor = db.ai_insights.find({}, {"_id": 0})
 
-    metrics_cursor = db.health_metrics.find({}, {"_id": 0})
-    all_data['health_metrics'] = await metrics_cursor.to_list(length=None)
+    all_data = {
+        'users': await users_cursor.to_list(length=None),
+        'health_metrics': await health_metrics_cursor.to_list(length=None),
+        'tbi_alerts': await tbi_alerts_cursor.to_list(length=None),
+        'ai_insights': await ai_insights_cursor.to_list(length=None)
+    }
 
-    alerts_cursor = db.tbi_alerts.find({}, {"_id": 0})
-    all_data['tbi_alerts'] = await alerts_cursor.to_list(length=None)
-    
-    insights_cursor = db.ai_insights.find({}, {"_id": 0})
-    all_data['ai_insights'] = await insights_cursor.to_list(length=None)
-
-    # Convert all documents to serializable format (especially datetimes)
-    def deep_serialize(obj):
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        if isinstance(obj, list):
-            return [deep_serialize(item) for item in obj]
-        if isinstance(obj, dict):
-            return {k: deep_serialize(v) for k, v in obj.items() if k != '_id'}
-        return obj
-
-    serialized_data = deep_serialize(all_data)
+    # Use the serializing utility to convert nested datetimes
+    serialized_data = serialize_doc(all_data)
 
     # Return as JSON file response
     return JSONResponse(
@@ -673,23 +670,19 @@ app.include_router(api_router)
 # -------------------------------------------------------
 # CORS Middleware
 # -------------------------------------------------------
-# Configured to handle Netlify dynamic subdomains and localhost during development
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "https://neuro-sense-ai.netlify.app",
-        # Explicitly adding the Render URL for safety in case of self-requests/redirects
-        os.environ.get("BACKEND_URL", "https://neuro-sense-ai.onrender.com")
     ],
-    # This regex is meant to cover all Netlify previews and the main domain
     allow_origin_regex=r"https?:\/\/(localhost(:[0-9]+)?|([a-zA-Z0-9\-]+\.netlify\.app))", 
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all HTTP methods (GET, POST, etc.)
-    allow_headers=["*"],  # Allows all headers (including Authorization for JWT)
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# Render needs explicit OPTIONS preflight handling for some environments
+# Render needs explicit OPTIONS preflight handling
 @app.options("/{rest_of_path:path}")
 async def preflight_handler(rest_of_path: str):
     return {"status": "ok"}
