@@ -111,7 +111,7 @@ class GenerateInsightRequest(BaseModel):
     user_id: str
 
 # -------------------------------------------------------
-# Utility Functions (FIXED: Robust Serialization)
+# Utility Functions 
 # -------------------------------------------------------
 def hash_password(password: str):
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -177,7 +177,6 @@ def to_datetime(date_string):
     """Converts MongoDB ISO string back to datetime object, handling timezone data."""
     if isinstance(date_string, str):
         try:
-            # Replace 'Z' with '+00:00' to handle standard ISO format with UTC timezone
             return datetime.fromisoformat(date_string.replace('Z', '+00:00'))
         except ValueError:
             return None
@@ -186,36 +185,46 @@ def to_datetime(date_string):
 def serialize_doc(doc):
     """
     Recursively serialize MongoDB document for JSON response.
-    CRUCIAL FIX: Handles ObjectId conversion and datetime objects.
+    Handles ObjectId conversion and datetime objects.
     """
     if doc is None:
         return None
     
-    if not isinstance(doc, dict):
-        try:
-            doc = doc.model_dump(by_alias=True, exclude_none=True)
-        except AttributeError:
-            # If it's a raw ObjectId object causing the original crash
-            if isinstance(doc, ObjectId):
-                return str(doc)
-            pass
+    # 1. Convert Pydantic model to dict if passed, otherwise keep dict/list
+    if hasattr(doc, 'model_dump'):
+        doc = doc.model_dump(by_alias=True, exclude_none=True)
+    elif not isinstance(doc, dict) and not isinstance(doc, list):
+        # Handle raw ObjectId objects directly
+        if isinstance(doc, ObjectId):
+            return str(doc)
+        return doc # Return other non-iterable non-dicts as is
 
-    # Handle ObjectId directly at the top level
-    if '_id' in doc:
-        doc['id'] = str(doc.pop('_id'))
+    # 2. Handle lists recursively
+    if isinstance(doc, list):
+        return [serialize_doc(item) for item in doc]
+        
+    # 3. Handle dictionaries recursively
+    if isinstance(doc, dict):
+        # Handle ObjectId at the top level and pop it from the mongo document
+        if '_id' in doc:
+            doc['id'] = str(doc.pop('_id'))
 
-    # Handle datetime and recursive serialization for nested dicts/lists
-    for key, value in doc.items():
-        if isinstance(value, datetime):
-            doc[key] = value.isoformat()
-        elif isinstance(value, ObjectId):
-            doc[key] = str(value)
-        elif isinstance(value, dict):
-            doc[key] = serialize_doc(value)
-        elif isinstance(value, list):
-            doc[key] = [serialize_doc(item) for item in value]
-
+        new_doc = {}
+        for key, value in doc.items():
+            if isinstance(value, datetime):
+                new_doc[key] = value.isoformat()
+            elif isinstance(value, ObjectId):
+                new_doc[key] = str(value)
+            elif isinstance(value, dict):
+                new_doc[key] = serialize_doc(value)
+            elif isinstance(value, list):
+                new_doc[key] = [serialize_doc(item) for item in value]
+            else:
+                new_doc[key] = value
+        return new_doc
+    
     return doc
+
 
 # -------------------------------------------------------
 # Auth Endpoints
@@ -276,7 +285,6 @@ async def simulate(current_user=Depends(get_current_user)):
     uid = current_user["user_id"]
 
     thirty_seconds_ago = datetime.now(timezone.utc) - timedelta(seconds=30)
-    # Fetching latest metrics might return raw document with ObjectId if not serialized yet
     recent_metric = await db.health_metrics.find_one({
         "user_id": uid,
         "timestamp": {"$gte": thirty_seconds_ago.isoformat()}
@@ -349,8 +357,15 @@ async def simulate(current_user=Depends(get_current_user)):
         await db.tbi_alerts.insert_one(d)
         alerts_list.append(d)
 
+    # FIX: Ensure the dictionary elements are fully serialized before returning
+    serialized_metrics = serialize_doc(metrics_dict)
+    serialized_alerts = serialize_doc(alerts_list)
 
-    return {"message": "Simulated data and metrics generated", "latest_metrics": metrics_dict, "alerts": alerts_list}
+    return {
+        "message": "Simulated data and metrics generated", 
+        "latest_metrics": serialized_metrics, 
+        "alerts": serialized_alerts
+    }
 
 
 # -------------------------------------------------------
@@ -374,7 +389,6 @@ async def get_latest_metrics(current_user=Depends(get_current_user)):
             timestamp=datetime.now(timezone.utc)
         ).model_dump(by_alias=True, exclude_none=True)
 
-    # Use serialize_doc to handle the fetched document (which includes '_id')
     return serialize_doc(latest)
 
 
@@ -387,7 +401,6 @@ async def history(days: int = 7, current_user=Depends(get_current_user)):
         {"user_id": uid, "timestamp": {"$gte": time_cutoff.isoformat()}}
     ).sort("timestamp", 1)
 
-    # Serialize each document fetched from the database
     return [serialize_doc(doc) for doc in await cursor.to_list(length=None)]
 
 
@@ -402,7 +415,6 @@ async def get_alerts(current_user=Depends(get_current_user)):
         {"user_id": uid}
     ).sort("timestamp", -1)
 
-    # Serialize each document fetched from the database
     return [serialize_doc(doc) for doc in await cursor.to_list(length=None)]
 
 @api_router.post("/alerts/check")
@@ -441,7 +453,7 @@ async def check_alerts_manual(current_user=Depends(get_current_user)):
                 user_id=uid,
                 severity=severity,
                 message=message,
-                metrics=serialize_doc(latest), # Ensure nested metric data is clean
+                metrics=serialize_doc(latest),
                 timestamp=current_time
             )
 
@@ -450,10 +462,10 @@ async def check_alerts_manual(current_user=Depends(get_current_user)):
             await db.tbi_alerts.insert_one(d)
             alerts_list.append(d)
         
-    return {"alerts_created": len(alerts_list), "alerts": alerts_list}
+    return {"alerts_created": len(alerts_list), "alerts": serialize_doc(alerts_list)} # FIX: Serialize alerts_list here
 
 # -------------------------------------------------------
-# Gemini Insights Endpoints (FIXED: Date Conversion)
+# Gemini Insights Endpoints
 # -------------------------------------------------------
 @api_router.get("/insights")
 async def get_insights(current_user=Depends(get_current_user)):
@@ -463,7 +475,6 @@ async def get_insights(current_user=Depends(get_current_user)):
         {"user_id": uid}
     ).sort("timestamp", -1)
 
-    # Serialize each document fetched from the database
     return [serialize_doc(doc) for doc in await cursor.to_list(length=None)]
 
 @api_router.post("/insights/generate")
@@ -478,7 +489,6 @@ async def advanced_ai_insight(
 
     uid = request.user_id
 
-    # Fetch last 7 days of health metrics
     time_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     
     records = (
@@ -538,9 +548,10 @@ async def advanced_ai_insight(
     last_alert = serialize_doc(last_alert_raw)
     
     # CRITICAL FIX 2: Convert the timestamp string in the alert document back to datetime 
-    # if you want to use datetime methods like strftime.
+    # to use strftime for the prompt.
+    alert_timestamp_dt = None
     if last_alert and isinstance(last_alert.get("timestamp"), str):
-        last_alert["timestamp"] = to_datetime(last_alert["timestamp"])
+        alert_timestamp_dt = to_datetime(last_alert["timestamp"])
 
     prompt = f"""
     You are an AI assistant providing a detailed clinical-style cognitive analysis for a patient based on their last {len(records)} health metrics. The goal is to identify trends related to Traumatic Brain Injury (TBI) recovery or decline.
@@ -558,7 +569,7 @@ async def advanced_ai_insight(
     - Risk Score: {risk_score:.2f}
     - Risk Category: {risk}
 
-    {f"**Previous Alert:** A {last_alert['severity']} alert was issued on {last_alert['timestamp'].strftime('%Y-%m-%d')} for: {last_alert['message']}" if last_alert and last_alert['timestamp'] else ""}
+    {f"**Previous Alert:** A {last_alert['severity']} alert was issued on {alert_timestamp_dt.strftime('%Y-%m-%d')} for: {last_alert['message']}" if last_alert and alert_timestamp_dt else ""}
 
     **Instructions:**
     1. Analyze the provided data, commenting on the trend (improving/declining), stability (volatility), and specific metric areas with anomalies.
@@ -651,7 +662,7 @@ async def export_data(current_user=Depends(get_current_user)):
     if current_user["role"] != "researcher":
         raise HTTPException(status_code=403, detail="Access denied. Researcher role required.")
 
-    # Fetch all data from relevant collections
+    # Fetch all data from relevant collections (allowing _id for serialization)
     users_cursor = db.users.find({})
     health_metrics_cursor = db.health_metrics.find({})
     tbi_alerts_cursor = db.tbi_alerts.find({})
