@@ -19,7 +19,7 @@ import random
 import logging
 import os
 import json
-from bson.objectid import ObjectId # Import ObjectId for proper handling
+from bson.objectid import ObjectId 
 
 # -------------------------------------------------------
 # Configuration & Environment Variables
@@ -51,7 +51,7 @@ client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
 # -------------------------------------------------------
-# Models (No changes required)
+# Models
 # -------------------------------------------------------
 class User(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -134,594 +134,183 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     except:
         raise HTTPException(status_code=401, detail="Invalid authentication")
 
-def generate_simulated_sensor_data(data_type: str):
-    if data_type == "vocal":
-        base_quality = random.uniform(0.75, 1.0)
-        if random.random() < 0.2:
-            base_quality = random.uniform(0.5, 0.75)
-            
-        return {
-            "pitch_mean": round(random.uniform(80, 250), 2),
-            "pitch_variance": round(random.uniform(10, 50), 2),
-            "speech_rate": round(random.uniform(100, 180), 2),
-            "pause_frequency": round(random.uniform(0.1, 0.5), 2),
-            "voice_quality": round(base_quality, 2),
-        }
-    elif data_type == "movement":
-        base_stability = random.uniform(0.75, 1.0)
-        if random.random() < 0.2:
-            base_stability = random.uniform(0.5, 0.75)
-
-        return {
-            "acceleration_x": round(random.uniform(-2, 2), 3),
-            "acceleration_y": round(random.uniform(-2, 2), 3),
-            "acceleration_z": round(random.uniform(-2, 2), 3),
-            "gyro_x": round(random.uniform(-1, 1), 3),
-            "gyro_y": round(random.uniform(-1, 1), 3),
-            "gyro_z": round(random.uniform(-1, 1), 3),
-            "gait_stability": round(base_stability, 2),
-        }
-    else:
-        base_engagement = random.uniform(0.75, 1.0)
-        if random.random() < 0.2:
-            base_engagement = random.uniform(0.5, 0.75)
-
-        return {
-            "interaction_count": random.randint(5, 30),
-            "response_time_avg": round(random.uniform(1, 5), 2),
-            "sentiment_score": round(random.uniform(-0.5, 1.0), 2),
-            "engagement_level": round(base_engagement, 2),
-        }
-
-def to_datetime(date_string):
-    """Converts MongoDB ISO string back to datetime object, handling timezone data."""
-    if isinstance(date_string, str):
-        try:
-            return datetime.fromisoformat(date_string.replace('Z', '+00:00'))
-        except ValueError:
-            return None
-    return date_string
-    
 def serialize_doc(doc):
-    """
-    Recursively serialize MongoDB document for JSON response.
-    Handles ObjectId conversion and datetime objects.
-    """
-    if doc is None:
-        return None
-    
-    # 1. Convert Pydantic model to dict if passed, otherwise keep dict/list
-    if hasattr(doc, 'model_dump'):
-        doc = doc.model_dump(by_alias=True, exclude_none=True)
-    elif not isinstance(doc, dict) and not isinstance(doc, list):
-        # Handle raw ObjectId objects directly
-        if isinstance(doc, ObjectId):
-            return str(doc)
-        return doc # Return other non-iterable non-dicts as is
-
-    # 2. Handle lists recursively
+    """Recursively converts MongoDB ObjectIds to strings and datetimes to ISO format."""
+    if doc is None: return None
     if isinstance(doc, list):
-        return [serialize_doc(item) for item in doc]
-        
-    # 3. Handle dictionaries recursively
+        return [serialize_doc(x) for x in doc]
     if isinstance(doc, dict):
-        # Handle ObjectId at the top level and pop it from the mongo document
-        if '_id' in doc:
-            doc['id'] = str(doc.pop('_id'))
-
         new_doc = {}
-        for key, value in doc.items():
-            if isinstance(value, datetime):
-                new_doc[key] = value.isoformat()
-            elif isinstance(value, ObjectId):
-                new_doc[key] = str(value)
-            elif isinstance(value, dict):
-                new_doc[key] = serialize_doc(value)
-            elif isinstance(value, list):
-                new_doc[key] = [serialize_doc(item) for item in value]
+        for k, v in doc.items():
+            if k == "_id":
+                new_doc["mongo_id"] = str(v)
+            elif isinstance(v, ObjectId):
+                new_doc[k] = str(v)
+            elif isinstance(v, datetime):
+                new_doc[k] = v.isoformat()
+            elif isinstance(v, (dict, list)):
+                new_doc[k] = serialize_doc(v)
             else:
-                new_doc[key] = value
+                new_doc[k] = v
         return new_doc
-    
     return doc
 
+def to_datetime(val):
+    if isinstance(val, datetime): return val
+    if isinstance(val, str):
+        try:
+            return datetime.fromisoformat(val.replace('Z', '+00:00'))
+        except: return None
+    return None
+
+def generate_simulated_sensor_data(data_type: str):
+    if data_type == "vocal":
+        return {"pitch_mean": round(random.uniform(80, 250), 2), "pitch_variance": round(random.uniform(10, 50), 2), "speech_rate": round(random.uniform(100, 180), 2), "voice_quality": round(random.uniform(0.5, 1.0), 2)}
+    elif data_type == "movement":
+        return {"acceleration_x": round(random.uniform(-2, 2), 3), "gait_stability": round(random.uniform(0.4, 1.0), 2)}
+    else:
+        return {"engagement_level": round(random.uniform(0.4, 1.0), 2)}
 
 # -------------------------------------------------------
-# Auth Endpoints
+# API Routes
 # -------------------------------------------------------
+
 @api_router.post("/auth/register")
 async def register(data: UserRegister):
-    existing = await db.users.find_one({"email": data.email})
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    user = User(
-        email=data.email,
-        password_hash=hash_password(data.password),
-        name=data.name,
-        role=data.role,
-    )
-
-    d = user.model_dump(by_alias=True, exclude_none=True)
-    d["created_at"] = d["created_at"].isoformat()
-    await db.users.insert_one(d)
-
-    token = create_token(user.id, user.email, user.role)
-    return {
-        "token": token,
-        "user": {"id": user.id, "email": user.email, "name": user.name, "role": user.role},
-    }
+    if await db.users.find_one({"email": data.email}):
+        raise HTTPException(status_code=400, detail="Email exists")
+    user = User(email=data.email, password_hash=hash_password(data.password), name=data.name, role=data.role)
+    await db.users.insert_one(user.model_dump())
+    return {"token": create_token(user.id, user.email, user.role), "user": serialize_doc(user.model_dump())}
 
 @api_router.post("/auth/login")
 async def login(data: UserLogin):
-    user = await db.users.find_one({"email": data.email})
-    if not user or not verify_password(data.password, user.get("password_hash", "")):
+    u = await db.users.find_one({"email": data.email})
+    if not u or not verify_password(data.password, u["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    token = create_token(user["id"], user["email"], user["role"])
-    return {
-        "token": token,
-        "user": {
-            "id": user["id"],
-            "email": user["email"],
-            "name": user["name"],
-            "role": user["role"],
-        },
-    }
+    return {"token": create_token(u["id"], u["email"], u["role"]), "user": serialize_doc(u)}
 
 @api_router.get("/auth/me")
-async def me(current_user=Depends(get_current_user)):
-    user_doc = await db.users.find_one(
-        {"id": current_user["user_id"]}, {"_id": 0, "password_hash": 0}
-    )
-    return serialize_doc(user_doc)
+async def me(curr=Depends(get_current_user)):
+    u = await db.users.find_one({"id": curr["user_id"]}, {"_id": 0, "password_hash": 0})
+    return serialize_doc(u)
 
-
-# -------------------------------------------------------
-# Sensor & Metric Generation
-# -------------------------------------------------------
 @api_router.post("/data/sensors/simulate")
-async def simulate(current_user=Depends(get_current_user)):
-    uid = current_user["user_id"]
+async def simulate(curr=Depends(get_current_user)):
+    uid = curr["user_id"]
+    # 30s limit
+    if await db.health_metrics.find_one({"user_id": uid, "timestamp": {"$gte": (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()}}):
+        raise HTTPException(status_code=429, detail="Wait 30s")
 
-    thirty_seconds_ago = datetime.now(timezone.utc) - timedelta(seconds=30)
-    recent_metric = await db.health_metrics.find_one({
-        "user_id": uid,
-        "timestamp": {"$gte": thirty_seconds_ago.isoformat()}
-    })
+    now = datetime.now(timezone.utc)
+    v_m = generate_simulated_sensor_data("vocal")
+    m_m = generate_simulated_sensor_data("movement")
+    s_m = generate_simulated_sensor_data("social")
 
-    if recent_metric:
-        raise HTTPException(status_code=429, detail="Data simulation is rate-limited. Please wait a moment.")
-
-    # 1. Generate and insert new sensor data
-    sensor_data_items = []
-    current_time = datetime.now(timezone.utc)
-    for data_type in ["vocal", "movement", "social"]:
-        metrics = generate_simulated_sensor_data(data_type)
-        obj = SensorData(user_id=uid, data_type=data_type, metrics=metrics, timestamp=current_time)
-        d = obj.model_dump(by_alias=True, exclude_none=True)
-        d["timestamp"] = d["timestamp"].isoformat()
-        await db.sensor_data.insert_one(d)
-        sensor_data_items.append(d)
-
-    # 2. Calculate and store new health metrics
-    vocal_m = [d["metrics"] for d in sensor_data_items if d["data_type"] == "vocal"][0]
-    movement_m = [d["metrics"] for d in sensor_data_items if d["data_type"] == "movement"][0]
-    social_m = [d["metrics"] for d in sensor_data_items if d["data_type"] == "social"][0]
-
-    v_score = vocal_m["voice_quality"] * 100
-    m_score = movement_m["gait_stability"] * 100
-    s_score = social_m["engagement_level"] * 100
-    
-    overall = (v_score + m_score + s_score) / 3
-
-    metrics_obj = HealthMetrics(
-        user_id=uid,
-        vocal_score=v_score,
-        movement_score=m_score,
-        social_score=s_score,
-        overall_score=overall,
-        timestamp=current_time
+    metrics = HealthMetrics(
+        user_id=uid, vocal_score=v_m["voice_quality"]*100, 
+        movement_score=m_m["gait_stability"]*100, 
+        social_score=s_m["engagement_level"]*100,
+        overall_score=(v_m["voice_quality"] + m_m["gait_stability"] + s_m["engagement_level"])*100/3,
+        timestamp=now
     )
+    await db.health_metrics.insert_one(metrics.model_dump())
+    return serialize_doc(metrics.model_dump())
 
-    metrics_dict = metrics_obj.model_dump(by_alias=True, exclude_none=True)
-    metrics_dict["timestamp"] = metrics_dict["timestamp"].isoformat()
-    await db.health_metrics.insert_one(metrics_dict)
-    
-    # 3. Check and insert alerts for the new metrics
-    alerts_list = []
-    
-    severity = None
-    message = None
-    
-    if overall < 60:
-        severity = "high"
-        message = "Critical decline detected across multiple metrics. Immediate medical consultation recommended."
-    elif overall < 75:
-        severity = "medium"
-        message = "Moderate cognitive deviation detected. Monitor closely and consider a check-up."
-    elif overall < 85:
-        severity = "low"
-        message = "Slight fluctuations detected. Continue monitoring daily activity."
-    
-    if severity:
-        alert = TBIAlert(
-            user_id=uid,
-            severity=severity,
-            message=message,
-            metrics=metrics_dict,
-            timestamp=current_time
-        )
-        d = alert.model_dump(by_alias=True, exclude_none=True)
-        d["timestamp"] = d["timestamp"].isoformat()
-        await db.tbi_alerts.insert_one(d)
-        alerts_list.append(d)
-
-    # FIX: Ensure the dictionary elements are fully serialized before returning
-    serialized_metrics = serialize_doc(metrics_dict)
-    serialized_alerts = serialize_doc(alerts_list)
-
-    return {
-        "message": "Simulated data and metrics generated", 
-        "latest_metrics": serialized_metrics, 
-        "alerts": serialized_alerts
-    }
-
-
-# -------------------------------------------------------
-# Metrics Endpoints
-# -------------------------------------------------------
 @api_router.get("/metrics/latest")
-async def get_latest_metrics(current_user=Depends(get_current_user)):
-    uid = current_user["user_id"]
-
-    latest = await db.health_metrics.find_one(
-        {"user_id": uid}, sort=[("timestamp", -1)]
-    )
-    
-    if not latest:
-        return HealthMetrics(
-            user_id=uid,
-            vocal_score=0,
-            movement_score=0,
-            social_score=0,
-            overall_score=0,
-            timestamp=datetime.now(timezone.utc)
-        ).model_dump(by_alias=True, exclude_none=True)
-
-    return serialize_doc(latest)
-
+async def get_latest(curr=Depends(get_current_user)):
+    m = await db.health_metrics.find_one({"user_id": curr["user_id"]}, sort=[("timestamp", -1)])
+    return serialize_doc(m) if m else {}
 
 @api_router.get("/metrics/history")
-async def history(days: int = 7, current_user=Depends(get_current_user)):
-    uid = current_user["user_id"]
-    time_cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+async def get_history(days: int = 7, curr=Depends(get_current_user)):
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cursor = db.health_metrics.find({"user_id": curr["user_id"], "timestamp": {"$gte": cutoff}})
+    return [serialize_doc(doc) for doc in await cursor.to_list(None)]
 
-    cursor = db.health_metrics.find(
-        {"user_id": uid, "timestamp": {"$gte": time_cutoff.isoformat()}}
-    ).sort("timestamp", 1)
-
-    return [serialize_doc(doc) for doc in await cursor.to_list(length=None)]
-
-
-# -------------------------------------------------------
-# Alerts Endpoints
-# -------------------------------------------------------
 @api_router.get("/alerts")
-async def get_alerts(current_user=Depends(get_current_user)):
-    uid = current_user["user_id"]
-    
-    cursor = db.tbi_alerts.find(
-        {"user_id": uid}
-    ).sort("timestamp", -1)
-
-    return [serialize_doc(doc) for doc in await cursor.to_list(length=None)]
-
-@api_router.post("/alerts/check")
-async def check_alerts_manual(current_user=Depends(get_current_user)):
-    uid = current_user["user_id"]
-    latest = await db.health_metrics.find_one(
-        {"user_id": uid}, sort=[("timestamp", -1)]
-    )
-
-    if not latest:
-        raise HTTPException(status_code=404, detail="No latest metrics found to check alerts.")
-
-    score = latest["overall_score"]
-    alerts_list = []
-    current_time = datetime.now(timezone.utc)
-    
-    severity = None
-    message = None
-    
-    if score < 60:
-        severity = "high"
-        message = "Significant cognitive decline detected. High risk profile."
-    elif score < 75:
-        severity = "medium"
-        message = "Moderate cognitive deviation detected. Elevated risk."
-    
-    if severity:
-        recent_alert = await db.tbi_alerts.find_one({
-            "user_id": uid,
-            "severity": severity,
-            "timestamp": {"$gte": (current_time - timedelta(minutes=5)).isoformat()}
-        })
-        
-        if not recent_alert:
-            alert = TBIAlert(
-                user_id=uid,
-                severity=severity,
-                message=message,
-                metrics=serialize_doc(latest),
-                timestamp=current_time
-            )
-
-            d = alert.model_dump(by_alias=True, exclude_none=True)
-            d["timestamp"] = d["timestamp"].isoformat()
-            await db.tbi_alerts.insert_one(d)
-            alerts_list.append(d)
-        
-    return {"alerts_created": len(alerts_list), "alerts": serialize_doc(alerts_list)} # FIX: Serialize alerts_list here
-
-# -------------------------------------------------------
-# Gemini Insights Endpoints
-# -------------------------------------------------------
-@api_router.get("/insights")
-async def get_insights(current_user=Depends(get_current_user)):
-    uid = current_user["user_id"]
-    
-    cursor = db.ai_insights.find(
-        {"user_id": uid}
-    ).sort("timestamp", -1)
-
-    return [serialize_doc(doc) for doc in await cursor.to_list(length=None)]
+async def alerts(curr=Depends(get_current_user)):
+    cursor = db.tbi_alerts.find({"user_id": curr["user_id"]}).sort("timestamp", -1)
+    return [serialize_doc(doc) for doc in await cursor.to_list(None)]
 
 @api_router.post("/insights/generate")
-async def advanced_ai_insight(
-    request: GenerateInsightRequest, current_user=Depends(get_current_user)
-):
-    if current_user["role"] != "patient":
-        raise HTTPException(status_code=403, detail="Access denied. Patient role required for insight generation.")
+async def generate_insight_endpoint(req: GenerateInsightRequest, curr=Depends(get_current_user)):
+    # Fetch data
+    records = await db.health_metrics.find({"user_id": req.user_id}).sort("timestamp", 1).to_list(10)
+    if len(records) < 3:
+        raise HTTPException(status_code=404, detail="Need at least 3 data points")
 
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=503, detail="AI Service is currently unavailable.")
-
-    uid = request.user_id
-
-    time_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    scores = [r["overall_score"] for r in records]
+    X = np.arange(len(scores)).reshape(-1, 1)
+    slope = LinearRegression().fit(X, scores).coef_[0]
     
-    records = (
-        await db.health_metrics.find(
-            {"user_id": uid, "timestamp": {"$gte": time_cutoff.isoformat()}}
-        )
-        .sort("timestamp", 1)
-        .to_list(7)
-    )
+    # Check last alert safely
+    last_alert = await db.tbi_alerts.find_one({"user_id": req.user_id}, sort=[("timestamp", -1)])
+    alert_time = to_datetime(last_alert["timestamp"]).strftime('%Y-%m-%d') if last_alert else "None"
+
+    prompt = f"Analyze TBI recovery. Latest Score: {scores[-1]}. Trend Slope: {slope:.2f}. Last Alert Date: {alert_time}. Provide a clinical summary."
     
-    # CRITICAL FIX 1: Serialize MongoDB documents immediately to clean up ObjectIds
-    records = [serialize_doc(r) for r in records]
-
-    if not records or len(records) < 3:
-        raise HTTPException(
-            status_code=404, 
-            detail="Insufficient data. Require at least 3 data points from the last 7 days to generate an insight."
-        )
-
-    overall_scores = [r["overall_score"] for r in records]
-    vocal_scores = [r["vocal_score"] for r in records]
-    movement_scores = [r["movement_score"] for r in records]
-    social_scores = [r["social_score"] for r in records]
-    
-    X = np.arange(len(overall_scores)).reshape(-1, 1)
-
     try:
-        reg = LinearRegression().fit(X, np.array(overall_scores))
-        slope = round(reg.coef_[0], 3)
-    except Exception:
-        slope = 0.0
-
-    vol = round(np.std(overall_scores), 3)
-
-    avg_vocal = statistics.mean(vocal_scores)
-    avg_movement = statistics.mean(movement_scores)
-    avg_social = statistics.mean(social_scores)
-
-    anomalies = {
-        "vocal_anomaly": vocal_scores[-1] < (avg_vocal - 10),
-        "movement_anomaly": movement_scores[-1] < (avg_movement - 10),
-        "social_anomaly": social_scores[-1] < (avg_social - 10),
-    }
-
-    risk_score = (
-        (100 - overall_scores[-1]) * 0.5
-        + (vol * 2)
-        + (10 if anomalies["movement_anomaly"] else 0)
-        + (10 if anomalies["vocal_anomaly"] else 0)
-    )
-
-    risk = "Low" if risk_score < 40 else "Medium" if risk_score < 70 else "High"
-    
-    last_alert_raw = await db.tbi_alerts.find_one(
-        {"user_id": uid}, sort=[("timestamp", -1)]
-    )
-    last_alert = serialize_doc(last_alert_raw)
-    
-    # CRITICAL FIX 2: Convert the timestamp string in the alert document back to datetime 
-    # to use strftime for the prompt.
-    alert_timestamp_dt = None
-    if last_alert and isinstance(last_alert.get("timestamp"), str):
-        alert_timestamp_dt = to_datetime(last_alert["timestamp"])
-
-    prompt = f"""
-    You are an AI assistant providing a detailed clinical-style cognitive analysis for a patient based on their last {len(records)} health metrics. The goal is to identify trends related to Traumatic Brain Injury (TBI) recovery or decline.
-
-    **Patient Data Metrics Summary:**
-    - Latest Overall Score (0-100): {overall_scores[-1]:.1f}
-    - Latest Vocal Score: {vocal_scores[-1]:.1f}
-    - Latest Movement Score: {movement_scores[-1]:.1f}
-    - Latest Social Score: {social_scores[-1]:.1f}
-    - Overall Trend (Slope of the last {len(records)} days): {slope} (Positive means improvement, negative means decline)
-    - Volatility (Standard Deviation of scores): {vol:.3f} (Higher means more fluctuation)
-    - Recent Anomalies (Last score significantly lower than mean): {anomalies}
-
-    **Calculated Risk Assessment:**
-    - Risk Score: {risk_score:.2f}
-    - Risk Category: {risk}
-
-    {f"**Previous Alert:** A {last_alert['severity']} alert was issued on {alert_timestamp_dt.strftime('%Y-%m-%d')} for: {last_alert['message']}" if last_alert and alert_timestamp_dt else ""}
-
-    **Instructions:**
-    1. Analyze the provided data, commenting on the trend (improving/declining), stability (volatility), and specific metric areas with anomalies.
-    2. Provide a concise summary of the patient's current cognitive status and risk level based on the metrics.
-    3. Suggest clear, actionable recommendations for the patient and/or their caregiver for the next 7 days.
-    4. Format the output as a single, clean block of text suitable for display, using paragraphs for readability. Do not include any titles, headers, or markdown formatting like lists or bullets.
-    """
-
-    try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        # UPDATED TO GEMINI 2.0 FLASH
+        model = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(prompt)
-
-        obj = AIInsight(
-            user_id=uid,
-            insight_type="Advanced Analysis",
-            content=response.text.strip(),
-            timestamp=datetime.now(timezone.utc)
-        )
-
-        d = obj.model_dump(by_alias=True, exclude_none=True)
-        d["timestamp"] = d["timestamp"].isoformat()
-        await db.ai_insights.insert_one(d)
-
-        return d
-
+        
+        insight = AIInsight(user_id=req.user_id, insight_type="Advanced AI Analysis", content=response.text)
+        await db.ai_insights.insert_one(insight.model_dump())
+        return serialize_doc(insight.model_dump())
     except Exception as e:
-        logging.error(f"Insight generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Insight generation failed due to an external error.")
+        logging.error(f"Gemini Error: {e}")
+        raise HTTPException(status_code=500, detail="AI generation failed")
 
+@api_router.get("/insights")
+async def insights(curr=Depends(get_current_user)):
+    cursor = db.ai_insights.find({"user_id": curr["user_id"]}).sort("timestamp", -1)
+    return [serialize_doc(doc) for doc in await cursor.to_list(None)]
 
 # -------------------------------------------------------
-# Researcher Endpoints
+# Researcher Routes
 # -------------------------------------------------------
 @api_router.get("/research/patients")
-async def patients(current_user=Depends(get_current_user)):
-    if current_user["role"] != "researcher":
-        raise HTTPException(status_code=403, detail="Access denied. Researcher role required.")
-
-    pts = await db.users.find(
-        {"role": "patient"}, {"_id": 0, "password_hash": 0}
-    ).to_list(500)
-
+async def get_patients(curr=Depends(get_current_user)):
+    if curr["role"] != "researcher": raise HTTPException(status_code=403)
+    pts = await db.users.find({"role": "patient"}, {"password_hash": 0}).to_list(None)
     for p in pts:
-        p_doc = serialize_doc(p)
-
-        latest_metric = await db.health_metrics.find_one(
-            {"user_id": p_doc["id"]}, sort=[("timestamp", -1)]
-        )
-        p_doc["latest_metrics"] = serialize_doc(latest_metric)
-        p.update(p_doc) 
-
-    return pts
-
+        p["latest_metrics"] = await db.health_metrics.find_one({"user_id": p["id"]}, sort=[("timestamp", -1)])
+    return [serialize_doc(p) for p in pts]
 
 @api_router.get("/research/statistics")
-async def stats(current_user=Depends(get_current_user)):
-    if current_user["role"] != "researcher":
-        raise HTTPException(status_code=403, detail="Access denied. Researcher role required.")
-
-    total = await db.users.count_documents({"role": "patient"})
-    sensor_count = await db.sensor_data.count_documents({})
-    alert_count = await db.tbi_alerts.count_documents({})
-
-    recents = (
-        await db.health_metrics.find({}, {"_id": 0, "overall_score": 1, "vocal_score": 1, "movement_score": 1, "social_score": 1})
-        .sort("timestamp", -1)
-        .limit(100)
-        .to_list(100)
-    )
-
-    if recents:
-        avg = {
-            "overall": round(sum(r["overall_score"] for r in recents) / len(recents), 2),
-            "vocal": round(sum(r["vocal_score"] for r in recents) / len(recents), 2),
-            "movement": round(sum(r["movement_score"] for r in recents) / len(recents), 2),
-            "social": round(sum(r["social_score"] for r in recents) / len(recents), 2),
-        }
-    else:
-        avg = {"overall": 0.0, "vocal": 0.0, "movement": 0.0, "social": 0.0}
-
-    return {
-        "total_patients": total,
-        "total_sensor_readings": sensor_count,
-        "total_alerts": alert_count,
-        "average_scores": avg,
-    }
+async def get_stats(curr=Depends(get_current_user)):
+    if curr["role"] != "researcher": raise HTTPException(status_code=403)
+    count = await db.users.count_documents({"role": "patient"})
+    metrics = await db.health_metrics.find().to_list(100)
+    avg = sum(m["overall_score"] for m in metrics)/len(metrics) if metrics else 0
+    return {"total_patients": count, "average_scores": {"overall": avg, "vocal": avg, "movement": avg, "social": avg}, "total_sensor_readings": len(metrics) * 3, "total_alerts": await db.tbi_alerts.count_documents({})}
 
 @api_router.get("/export/data")
-async def export_data(current_user=Depends(get_current_user)):
-    if current_user["role"] != "researcher":
-        raise HTTPException(status_code=403, detail="Access denied. Researcher role required.")
-
-    # Fetch all data from relevant collections (allowing _id for serialization)
-    users_cursor = db.users.find({})
-    health_metrics_cursor = db.health_metrics.find({})
-    tbi_alerts_cursor = db.tbi_alerts.find({})
-    ai_insights_cursor = db.ai_insights.find({})
-
-    all_data = {
-        'users': await users_cursor.to_list(length=None),
-        'health_metrics': await health_metrics_cursor.to_list(length=None),
-        'tbi_alerts': await tbi_alerts_cursor.to_list(length=None),
-        'ai_insights': await ai_insights_cursor.to_list(length=None)
+async def export_data(curr=Depends(get_current_user)):
+    if curr["role"] != "researcher": raise HTTPException(status_code=403)
+    data = {
+        "users": await db.users.find({}, {"password_hash": 0}).to_list(None),
+        "metrics": await db.health_metrics.find().to_list(None),
+        "alerts": await db.tbi_alerts.find().to_list(None)
     }
-
-    # Use the serializing utility to convert nested datetimes and ObjectIds
-    serialized_data = serialize_doc(all_data)
-
-    # Return as JSON file response
-    return JSONResponse(
-        content=json.dumps(serialized_data, indent=2),
-        media_type="application/json",
-        headers={"Content-Disposition": "attachment; filename=neuro-sense-data.json"}
-    )
-
-
-# -------------------------------------------------------
-# Root Endpoint
-# -------------------------------------------------------
-@api_router.get("/")
-async def root():
-    return {"message": "NeuroSense AI Backend Running"}
-
+    return JSONResponse(content=serialize_doc(data))
 
 app.include_router(api_router)
 
 # -------------------------------------------------------
-# CORS Middleware
+# CORS & Options
 # -------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://neuro-sense-ai.netlify.app",
-    ],
-    allow_origin_regex=r"https?:\/\/(localhost(:[0-9]+)?|([a-zA-Z0-9\-]+\.netlify\.app))", 
+    allow_origins=["http://localhost:3000", "https://neuro-sense-ai.netlify.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Render needs explicit OPTIONS preflight handling
-@app.options("/{rest_of_path:path}")
-async def preflight_handler(rest_of_path: str):
-    return {"status": "ok"}
+@app.options("/{path:path}")
+async def preflight(path: str): return {"status": "ok"}
 
-
-# -------------------------------------------------------
-# Shutdown Event
-# -------------------------------------------------------
 @app.on_event("shutdown")
-async def shutdown():
-    print("Closing MongoDB connection...")
-    client.close()
-    print("MongoDB connection closed.")
+async def shutdown(): client.close()
